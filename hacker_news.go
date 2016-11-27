@@ -4,10 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"golang.org/x/net/html"
 	"log"
 	"net/http"
 	"strings"
+
+	"golang.org/x/net/html"
 )
 
 // import "text/template"
@@ -95,16 +96,17 @@ func (v *Visitor) CollectedText() string {
 
 // Item is a representation of a Hacker News story or comment
 type Item struct {
-	Author  string `json:"by"`
-	Body    string `json:"text"`
-	ID      int    `json:"id"`
-	Parent  int    `json:"parent"`
-	Replies int    `json:"descendants"`
-	Score   int    `json:"score"`
-	Time    int64  `json:"time"`
-	Title   string `json:"title"`
-	Type    string `json:"type"`
-	URL     string `json:"url"`
+	Author      string `json:"by"`
+	Body        string `json:"text"`
+	ID          int    `json:"id"`
+	Parent      int    `json:"parent"`
+	Descendants int    `json:"descendants"`
+	Kids        []int  `json:"kids"`
+	Score       int    `json:"score"`
+	Time        int64  `json:"time"`
+	Title       string `json:"title"`
+	Type        string `json:"type"`
+	URL         string `json:"url"`
 }
 
 func getHNItem(id int) *Item {
@@ -123,8 +125,6 @@ func getHNItem(id int) *Item {
 	if err = decoder.Decode(&item); err != nil {
 		log.Panicln("Decoding err:", err)
 	}
-
-	fmt.Printf("Item: %#v\n", item)
 
 	return item
 }
@@ -157,7 +157,7 @@ target: %s`,
 		icon,
 		i.Title,
 		i.Score,
-		i.Replies,
+		i.Descendants,
 		date,
 		i.itemURL(),
 		i.URL)
@@ -181,6 +181,10 @@ func (i *Item) formatCommentBody() string {
 
 func (i *Item) itemURL() string {
 	return fmt.Sprintf("https://news.ycombinator.com/item?id=%d", i.ID)
+}
+
+func (i *Item) authorURL() string {
+	return fmt.Sprintf("https://news.ycombinator.com/user?id=%s", i.Author)
 }
 
 func (i *Item) findRoot() *Item {

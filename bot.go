@@ -143,6 +143,69 @@ func (b *Bot) previewURLs(msg *discordgo.Message) {
 	}
 }
 
+func (b *Bot) previewHNStory(item *Item, msg *discordgo.Message) {
+	description := fmt.Sprintf("**%d** points. **%d** comments", item.Score, item.Descendants)
+
+	embed := &discordgo.MessageEmbed{
+		URL:         item.itemURL(),
+		Type:        "article",
+		Title:       item.Title,
+		Description: description,
+		Color:       0xff6600,
+		Thumbnail: &discordgo.MessageEmbedThumbnail{
+			URL:    "https://news.ycombinator.com/y18.gif",
+			Width:  32,
+			Height: 32,
+		},
+		Provider: &discordgo.MessageEmbedProvider{
+			URL:  "https://news.ycombinator.com",
+			Name: "Hacker News",
+		},
+	}
+
+	_, _ = b.session.ChannelMessageSendEmbed(msg.ChannelID, embed)
+	_, _ = b.session.ChannelMessageSend(msg.ChannelID, item.URL)
+}
+
+func (b *Bot) previewHNComment(item *Item, msg *discordgo.Message) {
+	root := item.findRoot()
+
+	if root == nil {
+		log.Panicln("Couldn't find root of", item.Parent)
+	}
+
+	description := fmt.Sprintf(`**%d** replies. by **%s**`,
+		len(item.Kids),
+		item.Author)
+
+	embed := &discordgo.MessageEmbed{
+		URL:         item.itemURL(),
+		Type:        "article",
+		Title:       fmt.Sprintf("Comment on: %s", root.Title),
+		Description: description,
+		Color:       0xff6600,
+		Thumbnail: &discordgo.MessageEmbedThumbnail{
+			URL:    "https://news.ycombinator.com/y18.gif",
+			Width:  32,
+			Height: 32,
+		},
+		Provider: &discordgo.MessageEmbedProvider{
+			URL:  "https://news.ycombinator.com",
+			Name: "Hacker News",
+		},
+	}
+
+	_, _ = b.session.ChannelMessageSendEmbed(msg.ChannelID, embed)
+
+	commentBody := fmt.Sprintf(`:speech_left: **BEGIN QUOTE** :speech_balloon:
+
+%s
+
+:speech_left: **END QUOTE** :speech_balloon:`, item.formatCommentBody())
+
+	_, _ = b.session.ChannelMessageSend(msg.ChannelID, commentBody)
+}
+
 func (b *Bot) previewHackerNews(msg *discordgo.Message, link *url.URL) {
 	if link.Host != "news.ycombinator.com" {
 		return
@@ -159,7 +222,13 @@ func (b *Bot) previewHackerNews(msg *discordgo.Message, link *url.URL) {
 
 	item := getHNItem(intID)
 
-	_, _ = b.session.ChannelMessageSend(msg.ChannelID, item.Format())
+	switch item.Type {
+	case "story":
+		b.previewHNStory(item, msg)
+
+	case "comment":
+		b.previewHNComment(item, msg)
+	}
 }
 
 func (b *Bot) getIvonaSpeech(text string) (string, error) {
@@ -245,6 +314,8 @@ func (b *Bot) announceVoiceStateUpdate(update *discordgo.VoiceStateUpdate) {
 	if joinedChannel {
 		b.speakPresenceUpdate(update.VoiceState, "joined")
 	}
+
+	b.voiceStateCache[update.UserID] = update.VoiceState
 }
 
 func (b *Bot) onVoiceStateUpdate(_ *discordgo.Session, update *discordgo.VoiceStateUpdate) {
