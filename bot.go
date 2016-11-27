@@ -117,11 +117,26 @@ func (b *Bot) respondToPing(msg *discordgo.Message) {
 }
 
 func (b *Bot) previewURLs(msg *discordgo.Message) {
+	log.Println("Previewing URLs")
+
+	// It seems like the first time Discord encounters a unique URL it doesn't
+	// immediately appear as an Embed.
+	//
+	// It seems that in order to avoid a delay from parsing out URLs before
+	// relaying the message, Discord looks for URLs asynchronously then it edits
+	// the message once/if any URLs are found.
+	//
+	// The problem with simply adding a handler for the MessageUpdate event is
+	// that we wouldn't be able to distinguish new URLs from those we've already
+	// previewed unless we maintained a record.
+	//
+	// We avoid those issues and simply detect URLs ourselves.
+
 	for _, link := range xurls.Relaxed.FindAllString(msg.Content, -1) {
 		parsed, err := url.Parse(link)
 
 		if err != nil {
-			log.Println("Couldn't parse link:", link, err)
+			log.Println("Couldn't parse URL:", link, err)
 		}
 
 		b.previewHackerNews(msg, parsed)
