@@ -129,7 +129,7 @@ func (b *Bot) previewURLs(msg *discordgo.Message) {
 }
 
 func (b *Bot) previewHackerNews(msg *discordgo.Message, link *url.URL) {
-	if link.Host == "news.ycombinator.com" {
+	if link.Host != "news.ycombinator.com" {
 		return
 	}
 
