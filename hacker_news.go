@@ -141,30 +141,6 @@ func (i *Item) formatTime() string {
 	return t.Format("3:04pm PST on Monday, January 2")
 }
 
-func (i *Item) formatStory() string {
-	if i.Type != "story" {
-		log.Panicln("Attempting to format an item that isn't a story")
-	}
-
-	icon := "<:ycombinator:239206737075240960>"
-	date := i.formatTime()
-
-	sprintf := fmt.Sprintf(`%s **%s**
-**%d** points. **%d** comments. posted at %s
-
-thread: %s
-target: %s`,
-		icon,
-		i.Title,
-		i.Score,
-		i.Descendants,
-		date,
-		i.itemURL(),
-		i.URL)
-
-	return sprintf
-}
-
 func (i *Item) formatCommentBody() string {
 	doc, err := html.Parse(strings.NewReader(i.Body))
 
@@ -212,52 +188,4 @@ func (i *Item) findRoot() *Item {
 	default:
 		return nil
 	}
-}
-
-func (i *Item) formatComment() string {
-	if i.Type != "comment" {
-		log.Panicln("Attempting to format an item that isn't a story")
-	}
-
-	root := i.findRoot()
-
-	if root == nil {
-		log.Panicln("Couldn't find root of", i.Parent)
-	}
-
-	icon := "<:ycombinator:239206737075240960>"
-
-	sprintf := fmt.Sprintf(`%s **%s**
-comment posted by %s at %s
-
-:speech_left: **BEGIN QUOTE** :speech_balloon:
-
-%s
-
-:speech_left: **END QUOTE** :speech_balloon:
-
-thread: %s
-comment: %s`,
-		icon,
-		root.Title,
-		i.Author,
-		i.formatTime(),
-		i.formatCommentBody(),
-		i.itemURL(),
-		root.itemURL())
-
-	return sprintf
-}
-
-func (i *Item) Format() string {
-	switch i.Type {
-	case "story":
-		return i.formatStory()
-	case "comment":
-		return i.formatComment()
-	default:
-		log.Panicln("Unknown HN item type:", i.Type)
-	}
-
-	return "Unknown HN item type: " + i.Type
 }
