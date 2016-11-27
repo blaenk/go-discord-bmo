@@ -224,12 +224,7 @@ func (b *Bot) speakPresenceUpdate(voiceState *discordgo.VoiceState, action strin
 	}
 }
 
-func (b *Bot) onVoiceStateUpdate(_ *discordgo.Session, update *discordgo.VoiceStateUpdate) {
-	if b.IsSelf(update.UserID) {
-		log.Println("Ignoring bot's VoiceStateUpdate")
-		return
-	}
-
+func (b *Bot) announceVoiceStateUpdate(update *discordgo.VoiceStateUpdate) {
 	if cached, ok := b.voiceStateCache[update.UserID]; ok {
 		changedChannels := cached.ChannelID != update.ChannelID
 
@@ -250,6 +245,13 @@ func (b *Bot) onVoiceStateUpdate(_ *discordgo.Session, update *discordgo.VoiceSt
 	if joinedChannel {
 		b.speakPresenceUpdate(update.VoiceState, "joined")
 	}
+}
 
-	b.voiceStateCache[update.UserID] = update.VoiceState
+func (b *Bot) onVoiceStateUpdate(_ *discordgo.Session, update *discordgo.VoiceStateUpdate) {
+	if b.IsSelf(update.UserID) {
+		log.Println("Ignoring bot's VoiceStateUpdate")
+		return
+	}
+
+	b.announceVoiceStateUpdate(update)
 }
