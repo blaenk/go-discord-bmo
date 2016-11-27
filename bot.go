@@ -30,7 +30,7 @@ type Bot struct {
 // New creates a new Bot.
 func New() *Bot {
 	return &Bot{
-		voiceStateCache: make(map[string]*discordgo.VoiceState),
+		voiceStateCache: map[string]*discordgo.VoiceState{},
 		ivonaClient:     ivona.New(os.Getenv("IVONA_ACCESS_KEY"), os.Getenv("IVONA_SECRET_KEY")),
 	}
 }
