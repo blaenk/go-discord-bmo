@@ -198,18 +198,26 @@ func (b *Bot) ivonaSpeak(voiceConnection *discordgo.VoiceConnection, text string
 	return nil
 }
 
+func (b *Bot) friendlyName(member *discordgo.Member) string {
+	if member.Nick != "" {
+		return member.Nick
+	}
+
+	return member.User.Username
+}
+
 func (b *Bot) speakPresenceUpdate(voiceState *discordgo.VoiceState, action string) {
 	log.Println("User", voiceState.UserID, action, "channel", voiceState.ChannelID)
 
 	voiceConnection, err := b.session.ChannelVoiceJoin(voiceState.GuildID, voiceState.ChannelID, false, true)
 
-	user, err := b.session.User(voiceState.UserID)
+	member, err := b.session.State.Member(voiceState.GuildID, voiceState.UserID)
 
 	if err != nil {
 		log.Fatal("Can't find user", voiceState.UserID)
 	}
 
-	presenceText := fmt.Sprintf("%s %s the channel", user.Username, action)
+	presenceText := fmt.Sprintf("%s %s the channel", b.friendlyName(member), action)
 
 	if err := b.ivonaSpeak(voiceConnection, presenceText); err != nil {
 		log.Println("Couldn't speak with Ivona:", err)
