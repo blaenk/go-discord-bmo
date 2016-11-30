@@ -104,27 +104,42 @@ func (b *Bot) getOwnerID() {
 	}
 }
 
+func (b *Bot) getOrCreateGuildVoiceStateCache(guildID string) map[string]*discordgo.VoiceState {
+	if guildVoiceStateCache, ok := b.voiceStateCache[guildID]; ok {
+		return guildVoiceStateCache
+	}
+
+	b.voiceStateCache[guildID] = map[string]*discordgo.VoiceState{}
+	return b.voiceStateCache[guildID]
+}
+
+func (b *Bot) setupGuild(guild *discordgo.Guild) {
+	// Populate voiceStateCache
+	guildVoiceStateCache := b.getOrCreateGuildVoiceStateCache(guild.ID)
+
+	for _, voiceState := range guild.VoiceStates {
+		voiceState.GuildID = guild.ID
+		guildVoiceStateCache[voiceState.UserID] = voiceState
+	}
+
+	b.voiceStateCache[guild.ID] = guildVoiceStateCache
+}
+
 func (b *Bot) onReady(_ *discordgo.Session, event *discordgo.Ready) {
 	b.sessionLog.Info("Connection is ready")
 
 	b.getSelfID()
 	b.getOwnerID()
 
-	// Populate voiceStateCache
 	for _, guild := range event.Guilds {
-		guildVoiceStateCache := map[string]*discordgo.VoiceState{}
-
-		for _, voiceState := range guild.VoiceStates {
-			voiceState.GuildID = guild.ID
-			guildVoiceStateCache[voiceState.UserID] = voiceState
+		if !guild.Unavailable {
+			b.setupGuild(guild)
 		}
-
-		b.voiceStateCache[guild.ID] = guildVoiceStateCache
 	}
+}
 
-	if len(b.voiceStateCache) > 0 {
-		b.voiceLog.Info("Bootstrapped voice state cache")
-	}
+func (b *Bot) onGuildCreate(_ *discordgo.Session, guild *discordgo.GuildCreate) {
+	b.setupGuild(guild.Guild)
 }
 
 // IsSelf checks if the ID is the bot's ID.
@@ -445,9 +460,9 @@ func (b *Bot) onUserJoinVoiceChannel(voiceState *discordgo.VoiceState) {
 }
 
 func (b *Bot) announceVoiceStateUpdate(update *discordgo.VoiceState) {
-	guildCache := b.voiceStateCache[update.GuildID]
+	guildVoiceStateCache := b.getOrCreateGuildVoiceStateCache(update.GuildID)
 
-	if cached, wasCached := guildCache[update.UserID]; wasCached {
+	if cached, wasCached := guildVoiceStateCache[update.UserID]; wasCached {
 		changedChannels := cached.ChannelID != update.ChannelID
 
 		if !changedChannels {
@@ -461,7 +476,7 @@ func (b *Bot) announceVoiceStateUpdate(update *discordgo.VoiceState) {
 			b.onUserLeaveVoiceChannel(cached)
 		}
 
-		delete(guildCache, update.UserID)
+		delete(guildVoiceStateCache, update.UserID)
 	}
 
 	joinedChannel := update.ChannelID != ""
@@ -469,7 +484,7 @@ func (b *Bot) announceVoiceStateUpdate(update *discordgo.VoiceState) {
 	if joinedChannel {
 		b.onUserJoinVoiceChannel(update)
 
-		guildCache[update.UserID] = update
+		guildVoiceStateCache[update.UserID] = update
 	}
 }
 
