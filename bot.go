@@ -267,9 +267,6 @@ func (b *Bot) previewURLs(msg *discordgo.Message) {
 			continue
 		}
 
-		// TODO
-		// Create an interface for previewers and command responders.
-
 		for _, previewer := range b.previewers {
 			previewer.Preview(b, msg, parsed)
 		}
