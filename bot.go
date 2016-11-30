@@ -369,7 +369,12 @@ func (b *Bot) speakPresenceUpdate(voiceState *discordgo.VoiceState, action strin
 	member, err := b.session.State.Member(voiceState.GuildID, voiceState.UserID)
 
 	if err != nil {
-		b.sessionLog.WithError(err).Errorln("Can't find user", voiceState.UserID)
+		b.sessionLog.WithFields(log.Fields{
+			"guild": voiceState.GuildID,
+			"user":  voiceState.UserID,
+		}).WithError(err).Error("Couldn't find user")
+
+		return
 	}
 
 	presenceText := fmt.Sprintf("%s %s the channel", memberFriendlyName(member), action)
@@ -406,19 +411,22 @@ func (b *Bot) voiceStateLog(voiceState *discordgo.VoiceState) *log.Entry {
 	if guild, err := b.session.State.Guild(voiceState.GuildID); err == nil {
 		logger = logger.WithField("guild", guild.Name)
 	} else {
-		b.sessionLog.WithError(err).Errorln("Couldn't find guild", voiceState.GuildID)
+		b.sessionLog.WithField("guild", voiceState.GuildID).WithError(err).Error("Couldn't find guild")
+		logger = logger.WithField("guild", voiceState.GuildID)
 	}
 
 	if member, err := b.session.State.Member(voiceState.GuildID, voiceState.UserID); err == nil {
-		logger = logger.WithField("member", memberDiscordTag(member))
+		logger = logger.WithField("user", memberDiscordTag(member))
 	} else {
-		b.sessionLog.WithError(err).Errorln("Couldn't find user", voiceState.UserID)
+		b.sessionLog.WithField("user", voiceState.UserID).WithError(err).Error("Couldn't find user")
+		logger = logger.WithField("user", voiceState.UserID)
 	}
 
 	if channel, err := b.session.State.Channel(voiceState.ChannelID); err == nil {
 		logger = logger.WithField("channel", channel.Name)
 	} else {
-		b.sessionLog.WithError(err).Errorln("Couldn't find channel", voiceState.ChannelID)
+		b.sessionLog.WithField("channel", voiceState.ChannelID).WithError(err).Error("Couldn't find channel")
+		logger = logger.WithField("channel", voiceState.ChannelID)
 	}
 
 	return logger
