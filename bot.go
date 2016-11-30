@@ -50,6 +50,8 @@ type Bot struct {
 	commands   []Commander
 	previewers []Previewer
 
+	audioEvents chan *AudioEvent
+
 	sessionLog *log.Entry
 	chatLog    *log.Entry
 	voiceLog   *log.Entry
@@ -66,11 +68,46 @@ func New() *Bot {
 
 		ivonaClient: ivona.New(os.Getenv("IVONA_ACCESS_KEY"), os.Getenv("IVONA_SECRET_KEY")),
 
+		audioEvents: make(chan *AudioEvent),
+
 		sessionLog: log.WithField("topic", "session"),
 		chatLog:    log.WithField("topic", "chat"),
 		voiceLog:   log.WithField("topic", "voice"),
 		embedLog:   log.WithField("topic", "embed"),
 	}
+}
+
+type AudioEvent struct {
+	guildID        string
+	voiceChannelID string
+	audioFile      string
+}
+
+func (b *Bot) playAudio() {
+	b.voiceLog.Info("Starting PlayAudio goroutine")
+
+	for event := range b.audioEvents {
+		b.voiceLog.WithFields(log.Fields{
+			"guild":   event.guildID,
+			"channel": event.voiceChannelID,
+			"file":    event.audioFile,
+		}).Info("Received AudioEvent")
+
+		voiceConnection, err := b.session.ChannelVoiceJoin(event.guildID, event.voiceChannelID, false, true)
+
+		if err != nil {
+			b.voiceLog.WithFields(log.Fields{
+				"guild":   event.guildID,
+				"channel": event.voiceChannelID,
+			}).WithError(err).Error("Couldn't join voice channel")
+
+			continue
+		}
+
+		dgvoice.PlayAudioFile(voiceConnection, event.audioFile)
+	}
+
+	b.voiceLog.Fatal("Exited playAudio")
 }
 
 // Close closes the Discord session.
@@ -89,6 +126,8 @@ func (b *Bot) Open() error {
 	}
 
 	b.registerHandlers()
+
+	go b.playAudio()
 
 	return b.session.Open()
 }
@@ -264,20 +303,17 @@ func (b *Bot) getIvonaSpeech(text string) (string, error) {
 	return speechPath, nil
 }
 
-func (b *Bot) ivonaSpeak(voiceConnection *discordgo.VoiceConnection, text string) error {
+func (b *Bot) ivonaSpeak(guildID, voiceChannelID, text string) error {
 	// TODO
-	// This needs to be queued up as events that specify what to say in what channel.
-	// Currently switching between different channels while it's talking causes
-	// distortions, presumably because speaking happens in another goroutine so
-	// that the bot ends up switching channels mid-transmission.
-	//
-	// Instead it shouldn't switch channels until the transmission is complete.
-	//
 	// Look into the possibility of pausing certain audio transmissions, switching
 	// channels, then switching back and resuming.
 
 	if speechFile, err := b.getIvonaSpeech(text); err == nil {
-		dgvoice.PlayAudioFile(voiceConnection, speechFile)
+		b.audioEvents <- &AudioEvent{
+			guildID:        guildID,
+			voiceChannelID: voiceChannelID,
+			audioFile:      speechFile,
+		}
 	} else {
 		return err
 	}
@@ -290,10 +326,6 @@ func channelName(guild *discordgo.Guild, channel *discordgo.Channel) string {
 }
 
 func (b *Bot) speakPresenceUpdate(voiceState *discordgo.VoiceState, action string) {
-	voiceConnection, err := b.session.ChannelVoiceJoin(
-		voiceState.GuildID, voiceState.ChannelID,
-		false, true)
-
 	member, err := b.session.State.Member(voiceState.GuildID, voiceState.UserID)
 
 	if err != nil {
@@ -307,7 +339,7 @@ func (b *Bot) speakPresenceUpdate(voiceState *discordgo.VoiceState, action strin
 
 	presenceText := fmt.Sprintf("%s %s the channel", memberFriendlyName(member), action)
 
-	if err := b.ivonaSpeak(voiceConnection, presenceText); err != nil {
+	if err := b.ivonaSpeak(voiceState.GuildID, voiceState.ChannelID, presenceText); err != nil {
 		b.sessionLog.WithError(err).Error("Couldn't speak with Ivona")
 	}
 }
