@@ -5,8 +5,17 @@ import (
 	"os/signal"
 
 	log "github.com/Sirupsen/logrus"
+	"github.com/bwmarrin/discordgo"
 	"github.com/joho/godotenv"
 )
+
+type Ping struct{}
+
+func (p *Ping) Command(bot *Bot, msg *discordgo.Message) {
+	if msg.Content == "ping" {
+		_, _ = bot.session.ChannelMessageSend(msg.ChannelID, "Pong!")
+	}
+}
 
 func main() {
 	if err := godotenv.Load(); err != nil {
@@ -14,6 +23,8 @@ func main() {
 	}
 
 	bot := New()
+
+	bot.registerCommand(&Ping{})
 
 	bot.Open()
 	defer bot.Close()

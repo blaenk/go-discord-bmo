@@ -29,6 +29,11 @@ func memberDiscordTag(m *discordgo.Member) string {
 	return m.User.Username + "#" + m.User.Discriminator
 }
 
+// Commander represents a command responder
+type Commander interface {
+	Command(bot *Bot, message *discordgo.Message)
+}
+
 // Bot is a representation of the Bot.
 type Bot struct {
 	ownerID         string
@@ -37,6 +42,8 @@ type Bot struct {
 	lock            sync.Mutex
 	session         *discordgo.Session
 	voiceStateCache map[string]map[string]*discordgo.VoiceState
+
+	commands   []Commander
 
 	sessionLog *log.Entry
 	chatLog    *log.Entry
@@ -86,6 +93,10 @@ func (b *Bot) registerHandlers() {
 	b.session.AddHandler(b.onMessageUpdate)
 	b.session.AddHandler(b.onMessageCreate)
 	b.session.AddHandler(b.onVoiceStateUpdate)
+}
+
+func (b *Bot) registerCommand(command Commander) {
+	b.commands = append(b.commands, command)
 }
 
 func (b *Bot) getSelfID() {
@@ -152,6 +163,11 @@ func (b *Bot) IsOwner(ID string) bool {
 	return b.ownerID == ID
 }
 
+// CanIssueCommands checks whether the user with the given ID can issue commands.
+func (b *Bot) CanIssueCommands(ID string) bool {
+	return b.IsOwner(ID)
+}
+
 func (b *Bot) onMessageUpdate(_ *discordgo.Session, msg *discordgo.MessageUpdate) {
 	// Detect message updates here
 }
@@ -167,14 +183,12 @@ func (b *Bot) onMessageCreate(_ *discordgo.Session, msg *discordgo.MessageCreate
 
 	b.previewURLs(msg.Message)
 
-	if b.IsOwner(msg.Author.ID) {
-		b.respondToPing(msg.Message)
-	}
-}
-
-func (b *Bot) respondToPing(msg *discordgo.Message) {
-	if msg.Content == "ping" {
-		_, _ = b.session.ChannelMessageSend(msg.ChannelID, "Pong!")
+	// TODO
+	// Allow more granular permissions later.
+	if b.CanIssueCommands(msg.Author.ID) {
+		for _, command := range b.commands {
+			command.Command(b, msg.Message)
+		}
 	}
 }
 
