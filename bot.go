@@ -363,6 +363,17 @@ func (b *Bot) getIvonaSpeech(text string) (string, error) {
 }
 
 func (b *Bot) ivonaSpeak(voiceConnection *discordgo.VoiceConnection, text string) error {
+	// TODO
+	// This needs to be queued up as events that specify what to say in what channel.
+	// Currently switching between different channels while it's talking causes
+	// distortions, presumably because speaking happens in another goroutine so
+	// that the bot ends up switching channels mid-transmission.
+	//
+	// Instead it shouldn't switch channels until the transmission is complete.
+	//
+	// Look into the possibility of pausing certain audio transmissions, switching
+	// channels, then switching back and resuming.
+
 	if speechFile, err := b.getIvonaSpeech(text); err == nil {
 		dgvoice.PlayAudioFile(voiceConnection, speechFile)
 	} else {
