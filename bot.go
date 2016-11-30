@@ -433,13 +433,13 @@ func (b *Bot) voiceStateLog(voiceState *discordgo.VoiceState) *log.Entry {
 }
 
 func (b *Bot) onUserLeaveVoiceChannel(voiceState *discordgo.VoiceState) {
-	b.voiceStateLog(voiceState).Info("User joined")
+	b.voiceStateLog(voiceState).Info("User left")
 
 	b.speakPresenceUpdate(voiceState, "left")
 }
 
 func (b *Bot) onUserJoinVoiceChannel(voiceState *discordgo.VoiceState) {
-	b.voiceStateLog(voiceState).Info("User left")
+	b.voiceStateLog(voiceState).Info("User joined")
 
 	b.speakPresenceUpdate(voiceState, "joined")
 }
