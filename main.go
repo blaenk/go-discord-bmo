@@ -25,6 +25,7 @@ func main() {
 	bot := New()
 
 	bot.registerCommand(&Ping{})
+	bot.registerPreviewer(&HackerNews{})
 
 	bot.Open()
 	defer bot.Close()

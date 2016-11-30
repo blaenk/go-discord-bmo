@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"os"
 	"path"
-	"strconv"
 	"sync"
 
 	log "github.com/Sirupsen/logrus"
@@ -34,6 +33,11 @@ type Commander interface {
 	Command(bot *Bot, message *discordgo.Message)
 }
 
+// Previewer represents a type that is capable of previewing a given URL.
+type Previewer interface {
+	Preview(bot *Bot, message *discordgo.Message, url *url.URL)
+}
+
 // Bot is a representation of the Bot.
 type Bot struct {
 	ownerID         string
@@ -44,6 +48,7 @@ type Bot struct {
 	voiceStateCache map[string]map[string]*discordgo.VoiceState
 
 	commands   []Commander
+	previewers []Previewer
 
 	sessionLog *log.Entry
 	chatLog    *log.Entry
@@ -97,6 +102,10 @@ func (b *Bot) registerHandlers() {
 
 func (b *Bot) registerCommand(command Commander) {
 	b.commands = append(b.commands, command)
+}
+
+func (b *Bot) registerPreviewer(previewer Previewer) {
+	b.previewers = append(b.previewers, previewer)
 }
 
 func (b *Bot) getSelfID() {
@@ -219,133 +228,9 @@ func (b *Bot) previewURLs(msg *discordgo.Message) {
 		// TODO
 		// Create an interface for previewers and command responders.
 
-		b.previewHackerNews(msg, parsed)
-	}
-}
-
-func (b *Bot) previewHNStory(item *Item, msg *discordgo.Message, logger *log.Entry) {
-	description := fmt.Sprintf("**%d** points. **%d** comments", item.Score, item.Descendants)
-
-	embed := &discordgo.MessageEmbed{
-		URL:         item.itemURL(),
-		Type:        "article",
-		Title:       item.Title,
-		Description: description,
-		Color:       0xff6600,
-		Thumbnail: &discordgo.MessageEmbedThumbnail{
-			URL:    "https://news.ycombinator.com/y18.gif",
-			Width:  32,
-			Height: 32,
-		},
-		Provider: &discordgo.MessageEmbedProvider{
-			URL:  "https://news.ycombinator.com",
-			Name: "Hacker News",
-		},
-	}
-
-	_, err := b.session.ChannelMessageSendEmbed(msg.ChannelID, embed)
-
-	if err != nil {
-		logger.WithError(err).Error("Couldn't send HN Story embed")
-	}
-
-	_, err = b.session.ChannelMessageSend(msg.ChannelID, item.URL)
-
-	if err != nil {
-		logger.WithError(err).Error("Couldn't send HN Story target URL")
-	}
-}
-
-func (b *Bot) previewHNComment(item *Item, msg *discordgo.Message, logger *log.Entry) {
-	root, err := item.findRoot()
-
-	if err != nil {
-		logger.WithError(err).Error("Couldn't find root")
-		return
-	}
-
-	var description string
-
-	if len(item.Kids) == 0 {
-		description = fmt.Sprintf(`by **%s**`, item.Author)
-	} else {
-		description = fmt.Sprintf("**%d** replies. by **%s**", len(item.Kids), item.Author)
-	}
-
-	const HackerNewsOrange int = 0xff6600
-
-	embed := &discordgo.MessageEmbed{
-		URL:         item.itemURL(),
-		Type:        "article",
-		Title:       "Comment on: " + root.Title,
-		Description: description,
-		Color:       HackerNewsOrange,
-		Thumbnail: &discordgo.MessageEmbedThumbnail{
-			URL: "https://news.ycombinator.com/y18.gif",
-		},
-	}
-
-	_, err = b.session.ChannelMessageSendEmbed(msg.ChannelID, embed)
-
-	if err != nil {
-		logger.WithError(err).Error("Couldn't send HN Comment embed")
-	}
-
-	formattedBody, err := item.formatCommentBody()
-
-	if err != nil {
-		logger.WithError(err).Error("Couldn't parse HN Comment body HTML")
-		return
-	}
-
-	commentBody := fmt.Sprintf(`:speech_left: **BEGIN QUOTE** :speech_balloon:
-%s
-:speech_left: **END QUOTE** :speech_balloon:`, formattedBody)
-
-	_, err = b.session.ChannelMessageSend(msg.ChannelID, commentBody)
-
-	if err != nil {
-		logger.WithError(err).Error("Couldn't send HN Comment body")
-	}
-}
-
-func (b *Bot) previewHackerNews(msg *discordgo.Message, link *url.URL) {
-	if link.Host != "news.ycombinator.com" {
-		return
-	}
-
-	id := link.Query().Get("id")
-
-	hnLog := b.embedLog.WithFields(log.Fields{
-		"preview": "HN",
-		"id":      id,
-	})
-
-	intID, err := strconv.Atoi(id)
-
-	if err != nil {
-		hnLog.WithError(err).Error("Couldn't parse ID as int")
-		return
-	}
-
-	item, err := getHNItem(intID)
-
-	if err != nil {
-		hnLog.WithError(err).Error("Couldn't get item")
-		return
-	}
-
-	hnLog = hnLog.WithField("type", item.Type)
-
-	switch item.Type {
-	case "story":
-		b.previewHNStory(item, msg, hnLog)
-
-	case "comment":
-		b.previewHNComment(item, msg, hnLog)
-
-	default:
-		hnLog.Warn("Unknown HN item type")
+		for _, previewer := range b.previewers {
+			previewer.Preview(b, msg, parsed)
+		}
 	}
 }
 
