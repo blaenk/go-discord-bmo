@@ -404,7 +404,7 @@ func (b *Bot) onUserJoinVoiceChannel(voiceState *discordgo.VoiceState) {
 	b.speakPresenceUpdate(voiceState, "joined")
 }
 
-func (b *Bot) announceVoiceStateUpdate(update *discordgo.VoiceState) {
+func (b *Bot) detectVoiceChannelPresenceChange(update *discordgo.VoiceState) {
 	guildVoiceStateCache := b.getOrCreateGuildVoiceStateCache(update.GuildID)
 
 	if cached, wasCached := guildVoiceStateCache[update.UserID]; wasCached {
@@ -439,5 +439,5 @@ func (b *Bot) onVoiceStateUpdate(_ *discordgo.Session, update *discordgo.VoiceSt
 		return
 	}
 
-	b.announceVoiceStateUpdate(update.VoiceState)
+	b.detectVoiceChannelPresenceChange(update.VoiceState)
 }
