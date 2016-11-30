@@ -76,6 +76,8 @@ func (v *Visitor) visitChildren(node *html.Node) {
 	}
 }
 
+// Visit traverses the HTML document structure, converting the content to
+// Discord's Markdown-ish format as it goes.
 func (v *Visitor) Visit(node *html.Node) {
 	if node == nil {
 		return
@@ -91,6 +93,7 @@ func (v *Visitor) Visit(node *html.Node) {
 	}
 }
 
+// CollectedText produces the Discord Markdown-ish content.
 func (v *Visitor) CollectedText() string {
 	return v.buffer.String()
 }
