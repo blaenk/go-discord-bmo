@@ -138,7 +138,10 @@ func (b *Bot) setupGuild(guild *discordgo.Guild) {
 	guildVoiceStateCache := b.getOrCreateGuildVoiceStateCache(guild.ID)
 
 	for _, voiceState := range guild.VoiceStates {
-		voiceState.GuildID = guild.ID
+		if voiceState.GuildID == "" {
+			b.sessionLog.Fatal("GuildID isn't set for a VoiceState")
+		}
+
 		guildVoiceStateCache[voiceState.UserID] = voiceState
 	}
 
