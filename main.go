@@ -1,11 +1,11 @@
 package main
 
 import (
-	"github.com/joho/godotenv"
-
-	"log"
 	"os"
 	"os/signal"
+
+	log "github.com/Sirupsen/logrus"
+	"github.com/joho/godotenv"
 )
 
 func main() {
@@ -17,6 +17,8 @@ func main() {
 
 	bot.Open()
 	defer bot.Close()
+
+	log.RegisterExitHandler(func() { bot.Close() })
 
 	// Listen for SIGINT and gracefully disconnect.
 	signalChannel := make(chan os.Signal, 1)

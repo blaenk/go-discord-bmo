@@ -4,15 +4,16 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 
+	"time"
+
+	log "github.com/Sirupsen/logrus"
 	"golang.org/x/net/html"
 )
 
 // import "text/template"
-import "time"
 
 // Visitor is a Hacker News comment body HTML Visitor
 type Visitor struct {
@@ -109,13 +110,19 @@ type Item struct {
 	URL         string `json:"url"`
 }
 
-func getHNItem(id int) *Item {
+func getHNItem(id int) (*Item, error) {
 	url := fmt.Sprintf("https://hacker-news.firebaseio.com/v0/item/%d.json", id)
+
+	logger := log.WithFields(log.Fields{
+		"topic": "HN",
+		"ID":    id,
+	})
 
 	resp, err := http.Get(url)
 
 	if err != nil {
-		log.Panicln("Couldn't get a response:", err)
+		logger.WithError(err).Error("Couldn't get item")
+		return nil, err
 	}
 
 	decoder := json.NewDecoder(resp.Body)
@@ -123,36 +130,52 @@ func getHNItem(id int) *Item {
 	item := &Item{}
 
 	if err = decoder.Decode(&item); err != nil {
-		log.Panicln("Decoding err:", err)
+		logger.WithError(err).Error("Couldn't parse JSON")
+		return nil, err
 	}
 
-	return item
+	return item, nil
 }
 
 func (i *Item) formatTime() string {
+	t := time.Unix(i.Time, 0)
+	format := "3:04pm MST on Monday, January 2"
+
+	// TODO
+	// Allow timezone to be set via environment variable. If UTC Is chosen then we
+	// don't need to load the location.
+
 	pst, err := time.LoadLocation("America/Los_Angeles")
 
 	if err != nil {
-		log.Panicln("Can't load America/Los_Angeles")
+		log.WithFields(log.Fields{
+			"topic": "HN",
+			"id":    i.ID,
+		}).WithError(err).Error("Couldn't load America/Los_Angeles")
+
+		return t.UTC().Format(format)
 	}
 
-	t := time.Unix(i.Time, 0).In(pst)
-
-	return t.Format("3:04pm PST on Monday, January 2")
+	return t.In(pst).Format(format)
 }
 
-func (i *Item) formatCommentBody() string {
+func (i *Item) formatCommentBody() (string, error) {
 	doc, err := html.Parse(strings.NewReader(i.Body))
 
 	if err != nil {
-		log.Panicln("Coudln't parse HTML:", err)
+		log.WithFields(log.Fields{
+			"topic": "HN",
+			"id":    i.ID,
+		}).WithError(err).Error("Couldn't parse HTML")
+
+		return "", err
 	}
 
 	v := &Visitor{}
 
 	v.Visit(doc)
 
-	return v.CollectedText()
+	return v.CollectedText(), nil
 }
 
 func (i *Item) itemURL() string {
@@ -163,29 +186,33 @@ func (i *Item) authorURL() string {
 	return fmt.Sprintf("https://news.ycombinator.com/user?id=%s", i.Author)
 }
 
-func (i *Item) findRoot() *Item {
-	if i == nil {
-		log.Panicln("Couldn't find root")
+func (i *Item) findRoot() (*Item, error) {
+	logger := log.WithFields(log.Fields{
+		"topic": "HN",
+		"ID":    i.ID,
+	})
+
+	parent, err := getHNItem(i.Parent)
+
+	if err != nil {
+		logger.WithField("parent", i.Parent).WithError(err).Error("Couldn't get parent")
+		return nil, err
 	}
-
-	log.Println("Looking for root of", i.ID, "with ID", i.Parent)
-
-	parent := getHNItem(i.Parent)
-
-	if parent == nil {
-		log.Panicln("Coudln't find item", i.Parent)
-	}
-
-	log.Println("Found parent", parent.ID, "which is a", parent.Type)
 
 	switch parent.Type {
 	case "story":
-		return parent
+		return parent, nil
 
 	case "comment":
 		return parent.findRoot()
 
 	default:
-		return nil
+		err := fmt.Errorf("Unknown type")
+
+		logger.WithFields(log.Fields{
+			"type": parent.Type,
+		}).WithError(err).Error("Unknown HN item type")
+
+		return nil, err
 	}
 }

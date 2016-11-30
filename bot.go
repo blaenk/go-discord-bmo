@@ -4,18 +4,30 @@ import (
 	"crypto/sha1"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net/url"
 	"os"
 	"path"
 	"strconv"
 	"sync"
 
+	log "github.com/Sirupsen/logrus"
 	"github.com/bwmarrin/dgvoice"
 	"github.com/bwmarrin/discordgo"
 	ivona "github.com/jpadilla/ivona-go"
 	"github.com/mvdan/xurls"
 )
+
+func memberFriendlyName(m *discordgo.Member) string {
+	if m.Nick != "" {
+		return m.Nick
+	}
+
+	return m.User.Username
+}
+
+func memberDiscordTag(m *discordgo.Member) string {
+	return m.User.Username + "#" + m.User.Discriminator
+}
 
 // Bot is a representation of the Bot.
 type Bot struct {
@@ -24,14 +36,28 @@ type Bot struct {
 	ivonaClient     *ivona.Ivona
 	lock            sync.Mutex
 	session         *discordgo.Session
-	voiceStateCache map[string]*discordgo.VoiceState
+	voiceStateCache map[string]map[string]*discordgo.VoiceState
+
+	sessionLog *log.Entry
+	chatLog    *log.Entry
+	voiceLog   *log.Entry
+	embedLog   *log.Entry
 }
 
 // New creates a new Bot.
 func New() *Bot {
 	return &Bot{
-		voiceStateCache: map[string]*discordgo.VoiceState{},
-		ivonaClient:     ivona.New(os.Getenv("IVONA_ACCESS_KEY"), os.Getenv("IVONA_SECRET_KEY")),
+		// voiceStateCache is a map of GuildIDs to a voiceStateCache which is itself
+		// a map of UserIDs to their VoiceState. This mainly facilitates detecting
+		// when a user leaves or enters a channel.
+		voiceStateCache: map[string]map[string]*discordgo.VoiceState{},
+
+		ivonaClient: ivona.New(os.Getenv("IVONA_ACCESS_KEY"), os.Getenv("IVONA_SECRET_KEY")),
+
+		sessionLog: log.WithField("topic", "session"),
+		chatLog:    log.WithField("topic", "chat"),
+		voiceLog:   log.WithField("topic", "voice"),
+		embedLog:   log.WithField("topic", "embed"),
 	}
 }
 
@@ -47,7 +73,7 @@ func (b *Bot) Open() error {
 	b.session, err = discordgo.New("Bot " + os.Getenv("DISCORD_TOKEN"))
 
 	if err != nil {
-		log.Fatal("Couldn't establish a Discord session", err)
+		b.sessionLog.WithError(err).Fatal("Couldn't establish a Discord session")
 	}
 
 	b.registerHandlers()
@@ -57,6 +83,7 @@ func (b *Bot) Open() error {
 
 func (b *Bot) registerHandlers() {
 	b.session.AddHandler(b.onReady)
+	b.session.AddHandler(b.onMessageUpdate)
 	b.session.AddHandler(b.onMessageCreate)
 	b.session.AddHandler(b.onVoiceStateUpdate)
 }
@@ -65,7 +92,7 @@ func (b *Bot) getSelfID() {
 	if botUser, err := b.session.User("@me"); err == nil {
 		b.userID = botUser.ID
 	} else {
-		log.Fatal("Couldn't obtain account details", err)
+		b.sessionLog.WithError(err).Fatal("Couldn't obtain own account details")
 	}
 }
 
@@ -73,15 +100,31 @@ func (b *Bot) getOwnerID() {
 	if ownerUser, err := b.session.User(os.Getenv("BOT_OWNER")); err == nil {
 		b.ownerID = ownerUser.ID
 	} else {
-		log.Fatal("Couldn't obtain account details", err)
+		b.sessionLog.WithError(err).Fatal("Couldn't obtain owner account details")
 	}
 }
 
 func (b *Bot) onReady(_ *discordgo.Session, event *discordgo.Ready) {
-	log.Println("Connection is ready")
+	b.sessionLog.Info("Connection is ready")
 
 	b.getSelfID()
 	b.getOwnerID()
+
+	// Populate voiceStateCache
+	for _, guild := range event.Guilds {
+		guildVoiceStateCache := map[string]*discordgo.VoiceState{}
+
+		for _, voiceState := range guild.VoiceStates {
+			voiceState.GuildID = guild.ID
+			guildVoiceStateCache[voiceState.UserID] = voiceState
+		}
+
+		b.voiceStateCache[guild.ID] = guildVoiceStateCache
+	}
+
+	if len(b.voiceStateCache) > 0 {
+		b.voiceLog.Info("Bootstrapped voice state cache")
+	}
 }
 
 // IsSelf checks if the ID is the bot's ID.
@@ -94,18 +137,22 @@ func (b *Bot) IsOwner(ID string) bool {
 	return b.ownerID == ID
 }
 
+func (b *Bot) onMessageUpdate(_ *discordgo.Session, msg *discordgo.MessageUpdate) {
+	// Detect message updates here
+}
+
 func (b *Bot) onMessageCreate(_ *discordgo.Session, msg *discordgo.MessageCreate) {
 	// Ignore messages we created.
 	if b.IsSelf(msg.Author.ID) {
-		log.Println("Skipping self message:\n", msg.Content)
+		b.chatLog.Info("Skipping self message")
 		return
 	}
+
+	b.chatLog.Info("Received message from owner")
 
 	b.previewURLs(msg.Message)
 
 	if b.IsOwner(msg.Author.ID) {
-		log.Println("Received message from owner")
-
 		b.respondToPing(msg.Message)
 	}
 }
@@ -117,7 +164,7 @@ func (b *Bot) respondToPing(msg *discordgo.Message) {
 }
 
 func (b *Bot) previewURLs(msg *discordgo.Message) {
-	log.Println("Previewing URLs")
+	b.chatLog.Info("Previewing URLs")
 
 	// It seems like the first time Discord encounters a unique URL it doesn't
 	// immediately appear as an Embed.
@@ -136,14 +183,18 @@ func (b *Bot) previewURLs(msg *discordgo.Message) {
 		parsed, err := url.Parse(link)
 
 		if err != nil {
-			log.Println("Couldn't parse URL:", link, err)
+			b.chatLog.WithError(err).Errorln("Couldn't parse URL:", link)
+			continue
 		}
+
+		// TODO
+		// Create an interface for previewers and command responders.
 
 		b.previewHackerNews(msg, parsed)
 	}
 }
 
-func (b *Bot) previewHNStory(item *Item, msg *discordgo.Message) {
+func (b *Bot) previewHNStory(item *Item, msg *discordgo.Message, logger *log.Entry) {
 	description := fmt.Sprintf("**%d** points. **%d** comments", item.Score, item.Descendants)
 
 	embed := &discordgo.MessageEmbed{
@@ -163,47 +214,70 @@ func (b *Bot) previewHNStory(item *Item, msg *discordgo.Message) {
 		},
 	}
 
-	_, _ = b.session.ChannelMessageSendEmbed(msg.ChannelID, embed)
-	_, _ = b.session.ChannelMessageSend(msg.ChannelID, item.URL)
-}
+	_, err := b.session.ChannelMessageSendEmbed(msg.ChannelID, embed)
 
-func (b *Bot) previewHNComment(item *Item, msg *discordgo.Message) {
-	root := item.findRoot()
-
-	if root == nil {
-		log.Panicln("Couldn't find root of", item.Parent)
+	if err != nil {
+		logger.WithError(err).Error("Couldn't send HN Story embed")
 	}
 
-	description := fmt.Sprintf(`**%d** replies. by **%s**`,
-		len(item.Kids),
-		item.Author)
+	_, err = b.session.ChannelMessageSend(msg.ChannelID, item.URL)
+
+	if err != nil {
+		logger.WithError(err).Error("Couldn't send HN Story target URL")
+	}
+}
+
+func (b *Bot) previewHNComment(item *Item, msg *discordgo.Message, logger *log.Entry) {
+	root, err := item.findRoot()
+
+	if err != nil {
+		logger.WithError(err).Error("Couldn't find root")
+		return
+	}
+
+	var description string
+
+	if len(item.Kids) == 0 {
+		description = fmt.Sprintf(`by **%s**`, item.Author)
+	} else {
+		description = fmt.Sprintf("**%d** replies. by **%s**", len(item.Kids), item.Author)
+	}
+
+	const HackerNewsOrange int = 0xff6600
 
 	embed := &discordgo.MessageEmbed{
 		URL:         item.itemURL(),
 		Type:        "article",
-		Title:       fmt.Sprintf("Comment on: %s", root.Title),
+		Title:       "Comment on: " + root.Title,
 		Description: description,
-		Color:       0xff6600,
+		Color:       HackerNewsOrange,
 		Thumbnail: &discordgo.MessageEmbedThumbnail{
-			URL:    "https://news.ycombinator.com/y18.gif",
-			Width:  32,
-			Height: 32,
-		},
-		Provider: &discordgo.MessageEmbedProvider{
-			URL:  "https://news.ycombinator.com",
-			Name: "Hacker News",
+			URL: "https://news.ycombinator.com/y18.gif",
 		},
 	}
 
-	_, _ = b.session.ChannelMessageSendEmbed(msg.ChannelID, embed)
+	_, err = b.session.ChannelMessageSendEmbed(msg.ChannelID, embed)
+
+	if err != nil {
+		logger.WithError(err).Error("Couldn't send HN Comment embed")
+	}
+
+	formattedBody, err := item.formatCommentBody()
+
+	if err != nil {
+		logger.WithError(err).Error("Couldn't parse HN Comment body HTML")
+		return
+	}
 
 	commentBody := fmt.Sprintf(`:speech_left: **BEGIN QUOTE** :speech_balloon:
-
 %s
+:speech_left: **END QUOTE** :speech_balloon:`, formattedBody)
 
-:speech_left: **END QUOTE** :speech_balloon:`, item.formatCommentBody())
+	_, err = b.session.ChannelMessageSend(msg.ChannelID, commentBody)
 
-	_, _ = b.session.ChannelMessageSend(msg.ChannelID, commentBody)
+	if err != nil {
+		logger.WithError(err).Error("Couldn't send HN Comment body")
+	}
 }
 
 func (b *Bot) previewHackerNews(msg *discordgo.Message, link *url.URL) {
@@ -213,21 +287,36 @@ func (b *Bot) previewHackerNews(msg *discordgo.Message, link *url.URL) {
 
 	id := link.Query().Get("id")
 
+	hnLog := b.embedLog.WithFields(log.Fields{
+		"preview": "HN",
+		"id":      id,
+	})
+
 	intID, err := strconv.Atoi(id)
 
 	if err != nil {
-		log.Println("Couldn't convert ID", id, "to int:", err)
+		hnLog.WithError(err).Error("Couldn't parse ID as int")
 		return
 	}
 
-	item := getHNItem(intID)
+	item, err := getHNItem(intID)
+
+	if err != nil {
+		hnLog.WithError(err).Error("Couldn't get item")
+		return
+	}
+
+	hnLog = hnLog.WithField("type", item.Type)
 
 	switch item.Type {
 	case "story":
-		b.previewHNStory(item, msg)
+		b.previewHNStory(item, msg, hnLog)
 
 	case "comment":
-		b.previewHNComment(item, msg)
+		b.previewHNComment(item, msg, hnLog)
+
+	default:
+		hnLog.Warn("Unknown HN item type")
 	}
 }
 
@@ -236,21 +325,22 @@ func (b *Bot) getIvonaSpeech(text string) (string, error) {
 	speechPath := path.Join("./data/speech", shaSum)
 
 	if _, err := os.Stat(speechPath); err == nil {
-		log.Println("Found cached speech for:", text)
-
+		b.voiceLog.Infoln("Cache Hit: Ivona Speech:", text)
 		return speechPath, nil
 	}
 
-	log.Println("No cached speech found; requesting from Ivona.")
+	b.voiceLog.Info("Cache Miss: Ivona Speech")
 
 	speechOptions := ivona.NewSpeechOptions(text)
 	response, err := b.ivonaClient.CreateSpeech(speechOptions)
 
 	if err != nil {
+		b.voiceLog.WithError(err).Error("Ivona Speech request failure")
 		return "", err
 	}
 
 	if ioutil.WriteFile(speechPath, response.Audio, 0644) != nil {
+		b.voiceLog.WithError(err).Error("Couldn't cache Ivona Speech")
 		return "", err
 	}
 
@@ -267,62 +357,119 @@ func (b *Bot) ivonaSpeak(voiceConnection *discordgo.VoiceConnection, text string
 	return nil
 }
 
-func (b *Bot) friendlyName(member *discordgo.Member) string {
-	if member.Nick != "" {
-		return member.Nick
-	}
-
-	return member.User.Username
+func channelName(guild *discordgo.Guild, channel *discordgo.Channel) string {
+	return guild.Name + "#" + channel.Name + "[" + channel.Type + "]"
 }
 
 func (b *Bot) speakPresenceUpdate(voiceState *discordgo.VoiceState, action string) {
-	log.Println("User", voiceState.UserID, action, "channel", voiceState.ChannelID)
-
-	voiceConnection, err := b.session.ChannelVoiceJoin(voiceState.GuildID, voiceState.ChannelID, false, true)
+	voiceConnection, err := b.session.ChannelVoiceJoin(
+		voiceState.GuildID, voiceState.ChannelID,
+		false, true)
 
 	member, err := b.session.State.Member(voiceState.GuildID, voiceState.UserID)
 
 	if err != nil {
-		log.Fatal("Can't find user", voiceState.UserID)
+		b.sessionLog.WithError(err).Errorln("Can't find user", voiceState.UserID)
 	}
 
-	presenceText := fmt.Sprintf("%s %s the channel", b.friendlyName(member), action)
+	presenceText := fmt.Sprintf("%s %s the channel", memberFriendlyName(member), action)
 
 	if err := b.ivonaSpeak(voiceConnection, presenceText); err != nil {
-		log.Println("Couldn't speak with Ivona:", err)
+		b.sessionLog.WithError(err).Error("Couldn't speak with Ivona")
 	}
 }
 
-func (b *Bot) announceVoiceStateUpdate(update *discordgo.VoiceStateUpdate) {
-	if cached, ok := b.voiceStateCache[update.UserID]; ok {
+func (b *Bot) logger(logger *log.Entry, args ...interface{}) *log.Entry {
+	for _, arg := range args {
+		if arg == nil {
+			continue
+		}
+
+		switch t := arg.(type) {
+		case *discordgo.Guild:
+			logger = logger.WithField("guild", t.Name)
+
+		case *discordgo.Channel:
+			logger = logger.WithField("channel", t.Name)
+
+		case *discordgo.Member:
+			logger = logger.WithField("user", memberDiscordTag(t))
+		}
+	}
+
+	return logger
+}
+
+func (b *Bot) voiceStateLog(voiceState *discordgo.VoiceState) *log.Entry {
+	logger := b.voiceLog
+
+	if guild, err := b.session.State.Guild(voiceState.GuildID); err == nil {
+		logger = logger.WithField("guild", guild.Name)
+	} else {
+		b.sessionLog.WithError(err).Errorln("Couldn't find guild", voiceState.GuildID)
+	}
+
+	if member, err := b.session.State.Member(voiceState.GuildID, voiceState.UserID); err == nil {
+		logger = logger.WithField("member", memberDiscordTag(member))
+	} else {
+		b.sessionLog.WithError(err).Errorln("Couldn't find user", voiceState.UserID)
+	}
+
+	if channel, err := b.session.State.Channel(voiceState.ChannelID); err == nil {
+		logger = logger.WithField("channel", channel.Name)
+	} else {
+		b.sessionLog.WithError(err).Errorln("Couldn't find channel", voiceState.ChannelID)
+	}
+
+	return logger
+}
+
+func (b *Bot) onUserLeaveVoiceChannel(voiceState *discordgo.VoiceState) {
+	b.voiceStateLog(voiceState).Info("User joined")
+
+	b.speakPresenceUpdate(voiceState, "left")
+}
+
+func (b *Bot) onUserJoinVoiceChannel(voiceState *discordgo.VoiceState) {
+	b.voiceStateLog(voiceState).Info("User left")
+
+	b.speakPresenceUpdate(voiceState, "joined")
+}
+
+func (b *Bot) announceVoiceStateUpdate(update *discordgo.VoiceState) {
+	guildCache := b.voiceStateCache[update.GuildID]
+
+	if cached, wasCached := guildCache[update.UserID]; wasCached {
 		changedChannels := cached.ChannelID != update.ChannelID
 
 		if !changedChannels {
-			log.Println("No channel change detected")
+			b.voiceLog.Info("No channel change detected")
 			return
 		}
 
 		leftChannel := cached.ChannelID != ""
 
 		if leftChannel {
-			b.speakPresenceUpdate(cached, "left")
+			b.onUserLeaveVoiceChannel(cached)
 		}
+
+		delete(guildCache, update.UserID)
 	}
 
 	joinedChannel := update.ChannelID != ""
 
 	if joinedChannel {
-		b.speakPresenceUpdate(update.VoiceState, "joined")
-	}
+		b.onUserJoinVoiceChannel(update)
 
-	b.voiceStateCache[update.UserID] = update.VoiceState
+		guildCache[update.UserID] = update
+	}
 }
 
 func (b *Bot) onVoiceStateUpdate(_ *discordgo.Session, update *discordgo.VoiceStateUpdate) {
 	if b.IsSelf(update.UserID) {
-		log.Println("Ignoring bot's VoiceStateUpdate")
+		b.voiceLog.Info("Ignoring bot VoiceStateUpdate")
 		return
 	}
 
-	b.announceVoiceStateUpdate(update)
+	b.announceVoiceStateUpdate(update.VoiceState)
 }
