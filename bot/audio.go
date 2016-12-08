@@ -1,4 +1,4 @@
-package main
+package bot
 
 import (
 	"bufio"
@@ -25,6 +25,14 @@ const (
 	frameSize        int = 960
 	maxOpusFrameSize int = (frameSize * 2) * 2
 )
+
+// Audio event is a self-contained representation of an intent to emit audio in
+// a given voice channel.
+type AudioEvent struct {
+	guildID        string
+	voiceChannelID string
+	audioFile      string
+}
 
 // Audio contains the state needed for audio receiving and sending.
 type Audio struct {

@@ -1,4 +1,4 @@
-package main
+package bot
 
 import (
 	"crypto/sha1"
@@ -25,16 +25,6 @@ func memberFriendlyName(m *discordgo.Member) string {
 
 func memberDiscordTag(m *discordgo.Member) string {
 	return m.User.Username + "#" + m.User.Discriminator
-}
-
-// Commander represents a command responder
-type Commander interface {
-	Command(bot *Bot, message *discordgo.Message)
-}
-
-// Previewer represents a type that is capable of previewing a given URL.
-type Previewer interface {
-	Preview(bot *Bot, message *discordgo.Message, url *url.URL)
 }
 
 // Bot is a representation of the Bot.
@@ -81,10 +71,14 @@ func New() *Bot {
 	}
 }
 
-type AudioEvent struct {
-	guildID        string
-	voiceChannelID string
-	audioFile      string
+// EmbedLog is an embed-specific log.
+func (b *Bot) EmbedLog() *log.Entry {
+	return b.embedLog
+}
+
+// Session provides access to the underlying Discord session.
+func (b *Bot) Session() *discordgo.Session {
+	return b.session
 }
 
 func (b *Bot) playAudio() {
@@ -154,11 +148,14 @@ func (b *Bot) registerHandlers() {
 	b.session.AddHandler(b.onVoiceStateUpdate)
 }
 
-func (b *Bot) registerCommand(command Commander) {
+// RegisterCommand registers a Bot command that follows the Commander interface.
+func (b *Bot) RegisterCommand(command Commander) {
 	b.commands = append(b.commands, command)
 }
 
-func (b *Bot) registerPreviewer(previewer Previewer) {
+// RegisterPreviewer registers a URL previewer that follows the Previewer
+// interface.
+func (b *Bot) RegisterPreviewer(previewer Previewer) {
 	b.previewers = append(b.previewers, previewer)
 }
 

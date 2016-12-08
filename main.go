@@ -5,27 +5,22 @@ import (
 	"os/signal"
 
 	log "github.com/Sirupsen/logrus"
-	"github.com/bwmarrin/discordgo"
 	"github.com/joho/godotenv"
+
+	"github.com/blaenk/bmo/bot"
+	"github.com/blaenk/bmo/commanders/ping"
+	"github.com/blaenk/bmo/previewers/hn"
 )
-
-type Ping struct{}
-
-func (p *Ping) Command(bot *Bot, msg *discordgo.Message) {
-	if msg.Content == "ping" {
-		_, _ = bot.session.ChannelMessageSend(msg.ChannelID, "Pong!")
-	}
-}
 
 func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Fatal("Error loading .env file")
 	}
 
-	bot := New()
+	bot := bot.New()
 
-	bot.registerCommand(&Ping{})
-	bot.registerPreviewer(&HackerNews{})
+	bot.RegisterCommand(ping.New())
+	bot.RegisterPreviewer(hn.New())
 
 	bot.Open()
 	defer bot.Close()
