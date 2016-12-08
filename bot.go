@@ -10,7 +10,6 @@ import (
 	"sync"
 
 	log "github.com/Sirupsen/logrus"
-	"github.com/bwmarrin/dgvoice"
 	"github.com/bwmarrin/discordgo"
 	ivona "github.com/jpadilla/ivona-go"
 	"github.com/mvdan/xurls"
@@ -40,15 +39,18 @@ type Previewer interface {
 
 // Bot is a representation of the Bot.
 type Bot struct {
+	lock sync.Mutex
+
 	ownerID         string
 	userID          string
 	ivonaClient     *ivona.Ivona
-	lock            sync.Mutex
 	session         *discordgo.Session
 	voiceStateCache map[string]map[string]*discordgo.VoiceState
 
 	commands   []Commander
 	previewers []Previewer
+
+	audio *Audio
 
 	audioEvents chan *AudioEvent
 
@@ -67,6 +69,8 @@ func New() *Bot {
 		voiceStateCache: map[string]map[string]*discordgo.VoiceState{},
 
 		ivonaClient: ivona.New(os.Getenv("IVONA_ACCESS_KEY"), os.Getenv("IVONA_SECRET_KEY")),
+
+		audio: NewAudio(),
 
 		audioEvents: make(chan *AudioEvent),
 
@@ -93,7 +97,14 @@ func (b *Bot) playAudio() {
 			"file":    event.audioFile,
 		}).Info("Received AudioEvent")
 
+		// TODO
+		// Wrap ChannelVoiceJoin so that it automatically logs?
 		voiceConnection, err := b.session.ChannelVoiceJoin(event.guildID, event.voiceChannelID, false, true)
+
+		b.voiceLog.WithFields(log.Fields{
+			"guild":   event.guildID,
+			"channel": event.voiceChannelID,
+		}).Info("Joined channel")
 
 		if err != nil {
 			b.voiceLog.WithFields(log.Fields{
@@ -104,7 +115,11 @@ func (b *Bot) playAudio() {
 			continue
 		}
 
-		dgvoice.PlayAudioFile(voiceConnection, event.audioFile)
+		// TODO
+		// Will this repetitively add handlers?
+		voiceConnection.AddHandler(b.audio.onVoiceSpeakingUpdate)
+
+		b.audio.runFFMPEG(voiceConnection, event.audioFile)
 	}
 
 	b.voiceLog.Fatal("Exited playAudio")
@@ -149,6 +164,7 @@ func (b *Bot) registerPreviewer(previewer Previewer) {
 
 func (b *Bot) getSelfID() {
 	if botUser, err := b.session.User("@me"); err == nil {
+		b.sessionLog.WithField("id", botUser.ID).Info("Got self ID")
 		b.userID = botUser.ID
 	} else {
 		b.sessionLog.WithError(err).Fatal("Couldn't obtain own account details")
@@ -157,6 +173,7 @@ func (b *Bot) getSelfID() {
 
 func (b *Bot) getOwnerID() {
 	if ownerUser, err := b.session.User(os.Getenv("BOT_OWNER")); err == nil {
+		b.sessionLog.WithField("id", ownerUser.ID).Info("Got owner ID")
 		b.ownerID = ownerUser.ID
 	} else {
 		b.sessionLog.WithError(err).Fatal("Couldn't obtain owner account details")
@@ -306,6 +323,12 @@ func (b *Bot) ivonaSpeak(guildID, voiceChannelID, text string) error {
 	// channels, then switching back and resuming.
 
 	if speechFile, err := b.getIvonaSpeech(text); err == nil {
+		b.voiceLog.WithFields(log.Fields{
+			"path":    speechFile,
+			"guild":   guildID,
+			"channel": voiceChannelID,
+		}).Info("Emitting speech event")
+
 		b.audioEvents <- &AudioEvent{
 			guildID:        guildID,
 			voiceChannelID: voiceChannelID,
@@ -393,6 +416,10 @@ func (b *Bot) onUserLeaveVoiceChannel(voiceState *discordgo.VoiceState) {
 	b.voiceStateLog(voiceState).Info("User left")
 
 	b.speakPresenceUpdate(voiceState, "left")
+
+	// TODO
+	// Or should Audio register itself through a pointer to Bot?
+	b.audio.onUserLeaveVoiceChannel(voiceState)
 }
 
 func (b *Bot) onUserJoinVoiceChannel(voiceState *discordgo.VoiceState) {
@@ -435,6 +462,9 @@ func (b *Bot) onVoiceStateUpdate(_ *discordgo.Session, update *discordgo.VoiceSt
 		b.voiceLog.Info("Ignoring bot VoiceStateUpdate")
 		return
 	}
+
+	b.lock.Lock()
+	defer b.lock.Unlock()
 
 	b.detectVoiceChannelPresenceChange(update.VoiceState)
 }
