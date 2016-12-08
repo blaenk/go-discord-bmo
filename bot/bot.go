@@ -95,11 +95,6 @@ func (b *Bot) playAudio() {
 		// Wrap ChannelVoiceJoin so that it automatically logs?
 		voiceConnection, err := b.session.ChannelVoiceJoin(event.guildID, event.voiceChannelID, false, true)
 
-		b.voiceLog.WithFields(log.Fields{
-			"guild":   event.guildID,
-			"channel": event.voiceChannelID,
-		}).Info("Joined channel")
-
 		if err != nil {
 			b.voiceLog.WithFields(log.Fields{
 				"guild":   event.guildID,
@@ -108,6 +103,11 @@ func (b *Bot) playAudio() {
 
 			continue
 		}
+
+		b.voiceLog.WithFields(log.Fields{
+			"guild":   event.guildID,
+			"channel": event.voiceChannelID,
+		}).Info("Joined channel")
 
 		// TODO
 		// Will this repetitively add handlers?
