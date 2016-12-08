@@ -26,8 +26,8 @@ const (
 	maxOpusFrameSize int = (frameSize * 2) * 2
 )
 
-// Audio event is a self-contained representation of an intent to emit audio in
-// a given voice channel.
+// AudioEvent is a self-contained representation of an intent to emit audio in a
+// given voice channel.
 type AudioEvent struct {
 	guildID        string
 	voiceChannelID string
@@ -71,8 +71,8 @@ func NewAudio() *Audio {
 // onVoiceStateUpdate() which are invoked by the Bot.
 
 func (a *Audio) onVoiceSpeakingUpdate(voiceConnection *discordgo.VoiceConnection, speakingUpdate *discordgo.VoiceSpeakingUpdate) {
-	// FIXME
-	// VoiceSpeakingUpdate.SSRC should be changed to uint32 in discordgo
+	// In discordgo VoiceSpeakingUpdate.SSRC is int while it's uint32 everywhere
+	// else.
 	a.userSSRCs[speakingUpdate.UserID] = uint32(speakingUpdate.SSRC)
 }
 
@@ -87,88 +87,6 @@ func (a *Audio) onUserLeaveVoiceChannel(voiceState *discordgo.VoiceState) {
 	if voiceState.ChannelID == "" {
 		delete(a.streamDecoders, a.userSSRCs[voiceState.UserID])
 		delete(a.userSSRCs, voiceState.UserID)
-	}
-}
-
-// Receive PCM audio frames from the given channel, encode them with Opus, and
-// send them through Discord.
-func (a *Audio) sendPCM(voiceConnection *discordgo.VoiceConnection) {
-	log.Info("Entered sendPCM goroutine")
-
-	// TODO
-	// Audit this critical section for correctness.
-	//
-	// It seems to me like there should be separate synchronization for sending
-	// and receiving. I don't think there's an issue if both occur concurrently.
-
-	// Ensure that only one audio transmission is ongoing at any given moment.
-	log.Info("Acquiring audio lock")
-	a.lock.Lock()
-
-	// TODO
-	// This should probably use a condition variable?
-	if a.sendingPCM || a.discordAudioOutput == nil {
-		log.Info("Already sending; exiting sendPCM")
-		a.lock.Unlock()
-
-		// FIXME
-		//
-		// When this happens, we lose the context that I would imagine is necessary
-		// for sending PCM, namely the voice connection which provides the OpusSend
-		// channel to which Opus frames are sent.
-		//
-		// However, things still seem to work. Could it be the case that OpusSend
-		// remains the same regardless of VoiceConnection? Either way, we shouldn't
-		// rely on this implementation detail.
-		return
-	}
-
-	// Set the flag that signals that audio is currently being transmitted.
-	a.sendingPCM = true
-	a.lock.Unlock()
-
-	// Ensure that the flag is unset.
-	defer func() {
-		log.Info("Exiting sendPCM goroutine")
-		a.sendingPCM = false
-	}()
-
-	var err error
-
-	a.opusEncoder, err = gopus.NewEncoder(frequency, channels, gopus.Audio)
-
-	if err != nil {
-		log.WithError(err).Error("Couldn't create an Opus Encoder")
-		return
-	}
-
-	log.Info("Entering encode loop")
-
-	for {
-		// Receive a PCM frame, aborting if the channel is closed and there is no
-		// more audio data to process.
-		pcmFrame, ok := <-a.discordAudioOutput
-
-		if !ok {
-			log.Info("PCM Channel is closed")
-			return
-		}
-
-		// Encode the PCM frame with Opus.
-		opusFrame, err := a.opusEncoder.Encode(pcmFrame, frameSize, maxOpusFrameSize)
-
-		if err != nil {
-			log.WithError(err).Error("Encoding error")
-			return
-		}
-
-		if !voiceConnection.Ready || voiceConnection.OpusSend == nil {
-			log.Error("Client isn't ready to send Opus packets")
-			return
-		}
-
-		// Send the Opus frame through the Discord voice connection.
-		voiceConnection.OpusSend <- opusFrame
 	}
 }
 
@@ -207,16 +125,15 @@ func (a *Audio) receivePCM(voiceConnection *discordgo.VoiceConnection, outChanne
 		//
 		// For this reason we create a separate Opus decoder for each source stream
 		// to avoid mixing up their internal states on separate streams.
-		_, ok = a.streamDecoders[inboundAudioPacket.SSRC]
-
-		if !ok {
-			a.streamDecoders[inboundAudioPacket.SSRC], err = gopus.NewDecoder(frequency, channels)
+		if _, ok = a.streamDecoders[inboundAudioPacket.SSRC]; !ok {
+			decoder, err := gopus.NewDecoder(frequency, channels)
 
 			if err != nil {
 				log.WithError(err).Error("Couldn't create Opus decoder")
-				delete(a.streamDecoders, inboundAudioPacket.SSRC)
 				continue
 			}
+
+			a.streamDecoders[inboundAudioPacket.SSRC] = decoder
 		}
 
 		// Use the source stream-specific audio decoder to decode the Discord audio
@@ -234,41 +151,35 @@ func (a *Audio) receivePCM(voiceConnection *discordgo.VoiceConnection, outChanne
 	}
 }
 
-// TODO
-// Allow a Reader to be used as the audio source which is piped into ffmpeg
-// through pipe:0.
-func (a *Audio) runFFMPEG(voiceConnection *discordgo.VoiceConnection, filePath string) {
-	log.WithField("path", filePath).Info("Invoking FFMPEG")
-
-	ffmpeg := exec.Command("ffmpeg", "-i", filePath, "-f", "s16le", "-ar", strconv.Itoa(frequency), "-ac", strconv.Itoa(channels), "pipe:1")
-
-	ffmpegOut, err := ffmpeg.StdoutPipe()
-
-	if err != nil {
-		log.WithError(err).Error("Couldn't obtain ffmpeg stdout")
-		return
-	}
-
-	ffmpegBuffer := bufio.NewReaderSize(ffmpegOut, 16384)
-
-	err = ffmpeg.Start()
-	log.Info("Started FFMPEG")
-
-	if err != nil {
-		log.WithError(err).Error("Couldn't start ffmpeg")
-		return
-	}
+// SendPCM sends s16le PCM from the given reader to the given voice connection.
+func (a *Audio) SendPCM(voiceConnection *discordgo.VoiceConnection, reader io.Reader) {
+	a.lock.Lock()
+	defer a.lock.Unlock()
 
 	voiceConnection.Speaking(true)
 	defer voiceConnection.Speaking(false)
 
-	go a.sendPCM(voiceConnection)
+	var err error
 
+	a.opusEncoder, err = gopus.NewEncoder(frequency, channels, gopus.Audio)
+
+	if err != nil {
+		log.WithError(err).Error("Couldn't create an Opus Encoder")
+		return
+	}
+
+	// TODO
+	//
+	// Allow preemption of audio.
+	//
+	// Perhaps use a `select` here that listens to an interrupt channel. When
+	// interrupted, the buffer should be pushed back onto the event queue after
+	// the preempting event is processed.
 	for {
 		// Obtain an audio frame for each channel from the ffmpeg process.
-		audioBuffer := make([]int16, frameSize*channels)
+		pcmFrame := make([]int16, frameSize*channels)
 
-		err = binary.Read(ffmpegBuffer, binary.LittleEndian, &audioBuffer)
+		err = binary.Read(reader, binary.LittleEndian, &pcmFrame)
 
 		if err == io.EOF {
 			log.Info("Reached EOF")
@@ -285,7 +196,55 @@ func (a *Audio) runFFMPEG(voiceConnection *discordgo.VoiceConnection, filePath s
 			return
 		}
 
-		// Send the audio frames to be encoded
-		a.discordAudioOutput <- audioBuffer
+		// Encode the PCM frame.
+		opusFrame, err := a.opusEncoder.Encode(pcmFrame, frameSize, maxOpusFrameSize)
+
+		if err != nil {
+			log.WithError(err).Error("Encoding error")
+			return
+		}
+
+		if !voiceConnection.Ready || voiceConnection.OpusSend == nil {
+			log.Error("Client isn't ready to send Opus packets")
+			return
+		}
+
+		// Send the Opus frame through the Discord voice connection.
+		voiceConnection.OpusSend <- opusFrame
 	}
+}
+
+// TODO
+// Allow a Reader to be used as the audio source which is piped into ffmpeg
+// through pipe:0.
+func (a *Audio) runFFMPEG(voiceConnection *discordgo.VoiceConnection, filePath string) {
+	log.WithField("path", filePath).Info("Invoking FFMPEG")
+
+	ffmpeg := exec.Command(
+		"ffmpeg",
+		"-i", filePath,
+		"-f", "s16le",
+		"-ar", strconv.Itoa(frequency),
+		"-ac", strconv.Itoa(channels),
+		"pipe:1")
+
+	ffmpegOut, err := ffmpeg.StdoutPipe()
+	defer ffmpegOut.Close()
+
+	if err != nil {
+		log.WithError(err).Error("Couldn't obtain ffmpeg stdout")
+		return
+	}
+
+	ffmpegBuffer := bufio.NewReaderSize(ffmpegOut, 16384)
+
+	err = ffmpeg.Start()
+	log.Info("Started FFMPEG")
+
+	if err != nil {
+		log.WithError(err).Error("Couldn't start ffmpeg")
+		return
+	}
+
+	a.SendPCM(voiceConnection, ffmpegBuffer)
 }
