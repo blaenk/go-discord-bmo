@@ -43,6 +43,7 @@ func getHNItem(id int) (*Item, error) {
 	}
 
 	decoder := json.NewDecoder(resp.Body)
+	defer resp.Body.Close()
 
 	item := &Item{}
 
