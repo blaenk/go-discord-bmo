@@ -42,8 +42,6 @@ type Bot struct {
 
 	audio *Audio
 
-	audioEvents chan *AudioEvent
-
 	sessionLog *log.Entry
 	chatLog    *log.Entry
 	voiceLog   *log.Entry
@@ -52,7 +50,7 @@ type Bot struct {
 
 // New creates a new Bot.
 func New() *Bot {
-	return &Bot{
+	bot := &Bot{
 		// voiceStateCache is a map of GuildIDs to a voiceStateCache which is itself
 		// a map of UserIDs to their VoiceState. This mainly facilitates detecting
 		// when a user leaves or enters a channel.
@@ -60,15 +58,15 @@ func New() *Bot {
 
 		ivonaClient: ivona.New(os.Getenv("IVONA_ACCESS_KEY"), os.Getenv("IVONA_SECRET_KEY")),
 
-		audio: NewAudio(),
-
-		audioEvents: make(chan *AudioEvent),
-
 		sessionLog: log.WithField("topic", "session"),
 		chatLog:    log.WithField("topic", "chat"),
 		voiceLog:   log.WithField("topic", "voice"),
 		embedLog:   log.WithField("topic", "embed"),
 	}
+
+	bot.audio = NewAudio(bot)
+
+	return bot
 }
 
 // EmbedLog is an embed-specific log.
@@ -76,47 +74,14 @@ func (b *Bot) EmbedLog() *log.Entry {
 	return b.embedLog
 }
 
+// VoiceLog is an voice-specific log.
+func (b *Bot) VoiceLog() *log.Entry {
+	return b.voiceLog
+}
+
 // Session provides access to the underlying Discord session.
 func (b *Bot) Session() *discordgo.Session {
 	return b.session
-}
-
-func (b *Bot) playAudio() {
-	b.voiceLog.Info("Starting PlayAudio goroutine")
-
-	for event := range b.audioEvents {
-		b.voiceLog.WithFields(log.Fields{
-			"guild":   event.guildID,
-			"channel": event.voiceChannelID,
-			"file":    event.audioFile,
-		}).Info("Received AudioEvent")
-
-		// TODO
-		// Wrap ChannelVoiceJoin so that it automatically logs?
-		voiceConnection, err := b.session.ChannelVoiceJoin(event.guildID, event.voiceChannelID, false, true)
-
-		if err != nil {
-			b.voiceLog.WithFields(log.Fields{
-				"guild":   event.guildID,
-				"channel": event.voiceChannelID,
-			}).WithError(err).Error("Couldn't join voice channel")
-
-			continue
-		}
-
-		b.voiceLog.WithFields(log.Fields{
-			"guild":   event.guildID,
-			"channel": event.voiceChannelID,
-		}).Info("Joined channel")
-
-		// TODO
-		// Will this repetitively add handlers?
-		voiceConnection.AddHandler(b.audio.onVoiceSpeakingUpdate)
-
-		b.audio.runFFMPEG(voiceConnection, event.audioFile)
-	}
-
-	b.voiceLog.Fatal("Exited playAudio")
 }
 
 // Close closes the Discord session.
@@ -136,7 +101,7 @@ func (b *Bot) Open() error {
 
 	b.registerHandlers()
 
-	go b.playAudio()
+	go b.audio.ProcessAudioEventQueue()
 
 	return b.session.Open()
 }
@@ -326,11 +291,7 @@ func (b *Bot) ivonaSpeak(guildID, voiceChannelID, text string) error {
 			"channel": voiceChannelID,
 		}).Info("Emitting speech event")
 
-		b.audioEvents <- &AudioEvent{
-			guildID:        guildID,
-			voiceChannelID: voiceChannelID,
-			audioFile:      speechFile,
-		}
+		b.audio.EnqueueAudioFile(guildID, voiceChannelID, speechFile)
 	} else {
 		return err
 	}
