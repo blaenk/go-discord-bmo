@@ -1,10 +1,13 @@
 package bot
 
 import (
-	"bufio"
+	"crypto/sha1"
 	"encoding/binary"
+	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path"
 	"strconv"
 	"sync"
 
@@ -13,17 +16,10 @@ import (
 	"github.com/layeh/gopus"
 )
 
-// TODO
-// Move audio event queue code here.
-//
-// Perhaps have QueueAudio() and ImmediateAudio(), where the latter pauses
-// playback of the former before resuming.
-
 const (
-	channels         int = 2
-	frequency        int = 48000
-	frameSize        int = 960
-	maxOpusFrameSize int = (frameSize * 2) * 2
+	channels  int = 2
+	frequency int = 48000
+	frameSize int = 960
 )
 
 const (
@@ -34,18 +30,15 @@ const (
 	playerActionPreempt
 )
 
-type AudioBuffer interface {
-	io.Reader
-}
-
 // AudioEvent is a self-contained representation of an intent to emit audio in a
 // given voice channel.
 type AudioEvent struct {
 	guildID        string
 	voiceChannelID string
-	audio          io.Reader
+	audio          io.ReadCloser
 }
 
+// AudioEventQueue represents a blocking audio event queue.
 type AudioEventQueue struct {
 	cond  *sync.Cond
 	queue []*AudioEvent
@@ -62,7 +55,11 @@ func (q *AudioEventQueue) Clear() {
 	q.cond.L.Lock()
 	defer q.cond.L.Unlock()
 
-	q.queue = make([]*AudioEvent, 10)
+	for _, event := range q.queue {
+		event.audio.Close()
+	}
+
+	q.queue = make([]*AudioEvent, 0, 10)
 }
 
 func (q *AudioEventQueue) Enqueue(event *AudioEvent) {
@@ -77,7 +74,6 @@ func (q *AudioEventQueue) Enqueue(event *AudioEvent) {
 // Preempt swaps the head and the event after it.
 func (q *AudioEventQueue) Preempt() {
 	q.cond.L.Lock()
-	defer q.cond.L.Unlock()
 
 	if len(q.queue) < 2 {
 		return
@@ -87,38 +83,31 @@ func (q *AudioEventQueue) Preempt() {
 
 	q.queue[0] = next
 	q.queue[1] = head
+
+	q.cond.L.Unlock()
 }
 
 func (q *AudioEventQueue) EnqueueFront(event *AudioEvent) {
 	q.cond.L.Lock()
-	defer q.cond.L.Unlock()
 
 	q.queue = append([]*AudioEvent{event}, q.queue...)
+
+	q.cond.L.Unlock()
 }
 
 func (q *AudioEventQueue) Dequeue() *AudioEvent {
-	log.Info("Dequeueing")
-
 	q.cond.L.Lock()
 
-	log.Info("Acquired lock, checking len")
-
 	for len(q.queue) == 0 {
-		log.Info("Waiting on non-empty ...")
 		q.cond.Wait()
 	}
 
-	log.Info("Queue no longer empty")
-
-	defer func() {
-		q.cond.Signal()
-		q.cond.L.Unlock()
-	}()
-
-	log.Infof("Queue: %+v\n", q.queue)
-
 	var event *AudioEvent
 	event, q.queue = q.queue[0], q.queue[1:]
+
+	q.cond.Signal()
+	q.cond.L.Unlock()
+
 	return event
 }
 
@@ -127,7 +116,6 @@ type Audio struct {
 	bot            *Bot
 	userSSRCs      map[string]uint32
 	streamDecoders map[uint32]*gopus.Decoder
-	opusEncoder    *gopus.Encoder
 
 	sendingPCM   bool
 	receivingPCM bool
@@ -197,57 +185,46 @@ func (a *Audio) Preempt(guildID, voiceChannelID, filePath string) {
 }
 
 func (a *Audio) EnqueueAudioFile(guildID, voiceChannelID, filePath string) {
-	convertedAudio, err := a.convertFile(filePath)
+	// TODO
+	// This won't preserve enqueue order. e.g. if 1st enqueue takes 1hr to convert
+	// but 2nd enqueue takes 10 seconds, 2nd enqueue will effectively be enqueued
+	// first.
+	//
+	// Perhaps if the event is enqueued immediately but an Event.convert() is
+	// potentially run in a goroutine, eventually fulfilling an os.File* on the
+	// event struct when ready, while an attempt to read event.Audio() will block
+	// until it's available?
+	go func() {
+		convertedAudio, err := a.getOrConvertFile(filePath)
 
-	if err != nil {
-		log.WithError(err).Error("Conversion error")
-		return
-	}
+		if err != nil {
+			return
+		}
 
-	log.Info("Converted audio file")
-
-	a.queue.Enqueue(&AudioEvent{
-		guildID:        guildID,
-		voiceChannelID: voiceChannelID,
-		audio:          convertedAudio,
-	})
-
-	log.Infof("Audio Queue: %+v\n", a.queue.queue)
+		a.queue.Enqueue(&AudioEvent{
+			guildID:        guildID,
+			voiceChannelID: voiceChannelID,
+			audio:          convertedAudio,
+		})
+	}()
 }
 
 func (a *Audio) ProcessAudioEventQueue() {
 	a.bot.VoiceLog().Info("Starting PlayAudio goroutine")
 
-	// TODO
-	//
-	// select on:
-	//  * a.audioEvents for regular audio events
-	//  * a.sideChannel for pause/resume, abort, defer
-
-	// TODO
-	// Lock a.playerState, use the condvar to wait on a.playerState != playerActionPause
-
-	for i := 0; ; i++ {
-		log.Info("Process frame", i)
-
+	for {
 		a.stateCond.L.Lock()
 
 		for a.playerState == playerActionPause {
-			log.Info("Waiting for unpause ...")
 			a.stateCond.Wait()
 		}
 
-		log.Info("Resetting player state")
 		a.playerState = playerActionReady
 
 		a.stateCond.L.Unlock()
 
 		// Process an audio event
-		log.Info("Getting event")
 		event := a.queue.Dequeue()
-		log.Info("Got event")
-
-		log.Infof("Event: %+v\n", event)
 
 		a.bot.VoiceLog().WithFields(log.Fields{
 			"guild":   event.guildID,
@@ -321,15 +298,12 @@ func (a *Audio) onUserLeaveVoiceChannel(voiceState *discordgo.VoiceState) {
 
 // SendPCM sends s16le PCM from the given reader to the given voice connection.
 func (a *Audio) SendPCM(voiceConnection *discordgo.VoiceConnection, event *AudioEvent) {
-	log.Info("Waiting on send lock")
-
 	a.sendCond.L.Lock()
 
 	for a.sendingPCM {
 		a.sendCond.Wait()
 	}
 
-	log.Info("Acquired send lock")
 	a.sendingPCM = true
 
 	defer func() {
@@ -338,57 +312,20 @@ func (a *Audio) SendPCM(voiceConnection *discordgo.VoiceConnection, event *Audio
 		a.sendCond.Signal()
 		a.sendCond.L.Unlock()
 
-		log.Info("Released send lock")
+		a.bot.VoiceLog().Info("Released send lock")
 	}()
 
 	voiceConnection.Speaking(true)
 	defer voiceConnection.Speaking(false)
 
-	var err error
-
-	a.opusEncoder, err = gopus.NewEncoder(frequency, channels, gopus.Audio)
-
-	if err != nil {
-		log.WithError(err).Error("Couldn't create an Opus Encoder")
-		return
-	}
-
-	// TODO
-	//
-	// Allow preemption of audio.
-	//
-	// Perhaps use a `select` here that listens to an interrupt channel. When
-	// interrupted, the buffer should be pushed back onto the event queue after
-	// the preempting event is processed.
-	//
-	// In order to preempt this loop we'd need to save the work being done by
-	// enqueuing it to the front of the queue before the preempting event is
-	// itself enqueued to the front.
-	//
-	// To save our work we'd simply save the reader. This means we'd have two
-	// types of AudioEvents:
-	//
-	// * regular file event (guildID, voiceChannelID, filePath)
-	// * reader event (guildID, voiceChannelID, reader)
-	//
-	// Perhaps we can just store a Reader in the AudioEvent and then to a type
-	// switch on it, so that if it's a File we will use f.Name() with runFFMPEG
-	// and if it's just any other Reader then we use SendPCM.
-	//
-	// NOTE
-	// Is it safe to just save the Reader if it's derived from an FFMPEG stdout?
 	for {
 		a.stateCond.L.Lock()
 
 		switch a.playerState {
 		case playerActionSkip:
 			// Just quit the PCM-sending loop and let things here get garbage collected.
+			event.audio.Close()
 			a.stateCond.L.Unlock()
-			// FIXME
-			// In the case of an ffmpeg process backing this audio buffer we need to
-			// kill it by doing ffmpeg.Process.Kill() and possibly also
-			// ffmpeg.Process.Release() and possibly ffmpeg.Wait() which would
-			// hopefully be immediate.
 			return
 
 		case playerActionPause:
@@ -412,41 +349,32 @@ func (a *Audio) SendPCM(voiceConnection *discordgo.VoiceConnection, event *Audio
 
 		a.stateCond.L.Unlock()
 
-		// Obtain an audio frame for each channel from the ffmpeg process.
-		pcmFrame := make([]int16, frameSize*channels)
+		// 128 [kb] * 20 [frame size] / 8 [byte] = 320
+		opusFrame := make([]byte, 320)
 
-		err = binary.Read(event.audio, binary.LittleEndian, &pcmFrame)
-
-		// FIXME
-		// For these two cases we should dispose of the ffmpeg process in the case
-		// of an ffmpeg-backed audio buffer, namely via ffmpeg.Wait()
+		err := binary.Read(event.audio, binary.LittleEndian, &opusFrame)
 
 		if err == io.EOF {
-			log.Info("Reached EOF")
+			a.bot.VoiceLog().Info("Audio EOF")
+			event.audio.Close()
 			return
 		}
 
 		if err == io.ErrUnexpectedEOF {
-			log.Info("Reached Unexpected EOF")
+			a.bot.VoiceLog().Info("Audio unexpected EOF")
+			event.audio.Close()
 			return
 		}
 
 		if err != nil {
-			log.WithError(err).Error("Error reading from ffmpeg stdout")
-			return
-		}
-
-		// Encode the PCM frame.
-		opusFrame, err := a.opusEncoder.Encode(pcmFrame, frameSize, maxOpusFrameSize)
-
-		if err != nil {
-			log.WithError(err).Error("Encoding error")
+			a.bot.VoiceLog().WithError(err).Error("Error reading from ffmpeg stdout")
+			event.audio.Close()
 			return
 		}
 
 		if !voiceConnection.Ready || voiceConnection.OpusSend == nil {
-			log.Error("Client isn't ready to send Opus packets")
-			return
+			a.bot.VoiceLog().Error("Client isn't ready to send Opus packets")
+			// Keep looping until it's ready, otherwise this event will be dropped.
 		}
 
 		// Send the Opus frame through the Discord voice connection.
@@ -454,74 +382,64 @@ func (a *Audio) SendPCM(voiceConnection *discordgo.VoiceConnection, event *Audio
 	}
 }
 
-// TODO
-// Allow a Reader to be used as the audio source which is piped into ffmpeg
-// through pipe:0.
+func (a *Audio) getOrConvertFile(filePath string) (io.ReadCloser, error) {
+	a.bot.VoiceLog().WithField("path", filePath).Info("Getting or converting file")
 
-// TODO
-// Instead of piping out the audio, save it to a file? This would serve as a
-// cache as well as being more stable, at the cost of having to wait until the
-// entire conversion is complete.
-func (a *Audio) convertFile(filePath string) (io.Reader, error) {
-	log.WithField("path", filePath).Info("Invoking FFMPEG")
+	shaSum := fmt.Sprintf("%x", sha1.Sum([]byte(filePath)))
+	audioPath := path.Join("./data/opus", shaSum)
+
+	if _, err := os.Stat(audioPath); err == nil {
+		a.bot.VoiceLog().WithField("path", audioPath).Info("Cache Hit: Opus audio")
+		return os.Open(audioPath)
+	}
+
+	a.bot.VoiceLog().WithField("path", filePath).Info("Invoking FFMPEG")
 
 	ffmpeg := exec.Command(
 		"ffmpeg",
 		"-i", filePath,
-		"-f", "s16le",
+		"-f", "data",
+		"-map", "0:a",
 		"-ar", strconv.Itoa(frequency),
 		"-ac", strconv.Itoa(channels),
-		"pipe:1")
+		"-acodec", "libopus",
+		"-sample_fmt", "s16",
+		"-vbr", "off",
+		"-b:a", "128000",
+		"-compression_level", "10",
+		audioPath)
 
-	ffmpegOut, err := ffmpeg.StdoutPipe()
-	// defer ffmpegOut.Close()
+	err := ffmpeg.Start()
+
+	a.bot.VoiceLog().Info("FFMPEG started")
 
 	if err != nil {
-		log.WithError(err).Error("Couldn't obtain ffmpeg stdout")
+		a.bot.VoiceLog().WithError(err).Error("Couldn't start ffmpeg")
 		return nil, err
 	}
 
-	ffmpegBuffer := bufio.NewReaderSize(ffmpegOut, 16384)
+	err = ffmpeg.Wait()
 
-	err = ffmpeg.Start()
-	log.Info("Started FFMPEG")
+	a.bot.VoiceLog().Info("FFMPEG finished")
 
 	if err != nil {
-		log.WithError(err).Error("Couldn't start ffmpeg")
+		a.bot.VoiceLog().WithError(err).Error("Conversion error")
 		return nil, err
 	}
 
-	// FIXME
-	// We should call ffmpeg.Wait() to wait until the process exits in order to
-	// clear its associated resources, including the StdoutPipe. Not doing so
-	// results in resource leaks.
-	//
-	// The problem is that then StdoutPipe will be closed so we can't read from
-	// it. Some solutions to this include:
-	//
-	// * reading the entire buffer with ioutil.ReadAll/cmd.Output() -> []byte
-	// * saving the result to a file and then reading from it later
-	//
-	// Both of these have downsides:
-	//
-	// * keeping the entire uncompressed PCM buffer in memory
-	// * saving the entire uncompressed PCM buffer on disk
-	//
-	// It would be nice to use a Rust enum here to represent both
-	// RegularBuffer(reader) and CommandBuffer(ffmpeg) and appropriately dispose
-	// of each.
-	//
-	// Perhaps a middleground is to encode Opus to disk?
+	a.bot.VoiceLog().WithFields(log.Fields{
+		"from": filePath,
+		"to":   audioPath,
+	}).Info("Encoded Opus")
 
-	return ffmpegBuffer, nil
+	return os.Open(audioPath)
 }
 
 // Receive audio packets from the Discord voice connection and Opus-decode them
 // into PCM.
 func (a *Audio) receivePCM(voiceConnection *discordgo.VoiceConnection) {
 	// TODO
-	//
-	// use receiveCond
+	// Use receiveCond.
 
 	// TODO
 	//
@@ -531,14 +449,14 @@ func (a *Audio) receivePCM(voiceConnection *discordgo.VoiceConnection) {
 
 	for {
 		if !voiceConnection.Ready || voiceConnection.OpusRecv == nil {
-			log.Error("Client isn't ready to receive opus packets")
+			a.bot.VoiceLog().Error("Client isn't ready to receive opus packets")
 		}
 
 		// Obtain an audio packet from Discord's audio input.
 		inboundAudioPacket, ok := <-voiceConnection.OpusRecv
 
 		if !ok {
-			log.Info("No audio packet available")
+			a.bot.VoiceLog().Info("No audio packet available")
 			return
 		}
 
@@ -552,7 +470,7 @@ func (a *Audio) receivePCM(voiceConnection *discordgo.VoiceConnection) {
 			decoder, err := gopus.NewDecoder(frequency, channels)
 
 			if err != nil {
-				log.WithError(err).Error("Couldn't create Opus decoder")
+				a.bot.VoiceLog().WithError(err).Error("Couldn't create Opus decoder")
 				continue
 			}
 
@@ -564,7 +482,7 @@ func (a *Audio) receivePCM(voiceConnection *discordgo.VoiceConnection) {
 		inboundAudioPacket.PCM, err = a.streamDecoders[inboundAudioPacket.SSRC].Decode(inboundAudioPacket.Opus, frameSize, false)
 
 		if err != nil {
-			log.WithError(err).Error("Couldn't decode Opus data")
+			a.bot.VoiceLog().WithError(err).Error("Couldn't decode Opus data")
 			delete(a.streamDecoders, inboundAudioPacket.SSRC)
 			continue
 		}
