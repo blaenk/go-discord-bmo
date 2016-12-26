@@ -83,6 +83,7 @@ func NewAudio(bot *Bot) *Audio {
 	}
 }
 
+// Skip skips the current event.
 func (a *Audio) Skip() {
 	a.stateCond.L.Lock()
 
@@ -92,15 +93,18 @@ func (a *Audio) Skip() {
 	a.stateCond.L.Unlock()
 }
 
-func (a *Audio) Abort() {
+// Clear clears the entire event queue.
+func (a *Audio) Clear() {
 	a.stateCond.L.Lock()
 
+	a.queue.Clear()
 	a.playerState = PlayerStateCleared
 
 	a.stateCond.Signal()
 	a.stateCond.L.Unlock()
 }
 
+// Pause pauses the player.
 func (a *Audio) Pause() {
 	a.stateCond.L.Lock()
 
@@ -110,20 +114,11 @@ func (a *Audio) Pause() {
 	a.stateCond.L.Unlock()
 }
 
+// Resume resumes the player.
 func (a *Audio) Resume() {
 	a.stateCond.L.Lock()
 
 	a.playerState = PlayerStateReady
-
-	a.stateCond.Signal()
-	a.stateCond.L.Unlock()
-}
-
-func (a *Audio) Clear() {
-	a.stateCond.L.Lock()
-
-	a.queue.Clear()
-	a.playerState = PlayerStateCleared
 
 	a.stateCond.Signal()
 	a.stateCond.L.Unlock()
@@ -137,6 +132,8 @@ func (a *Audio) Clear() {
 //
 // Find a way to immediately enqueue some struct that starts to fulfill itself
 // in the background where a .Get() method blocks until it's fulfilled. Promise?
+
+// Preempt preempts the current event for the given one.
 func (a *Audio) Preempt(guildID, voiceChannelID, filePath string) {
 	a.stateCond.L.Lock()
 	defer func() {
@@ -177,7 +174,7 @@ func (a *Audio) ProcessAudioEventQueue() {
 
 		a.stateCond.L.Unlock()
 
-		// Process an audio event.
+		// Block until we get another audio event.
 		event := a.queue.Dequeue()
 
 		a.bot.VoiceLog().WithFields(log.Fields{
@@ -185,8 +182,7 @@ func (a *Audio) ProcessAudioEventQueue() {
 			"channel": event.voiceChannelID,
 		}).Info("Received AudioEvent")
 
-		// TODO
-		// Wrap ChannelVoiceJoin so that it automatically logs?
+		// Join the event's voice channel.
 		voiceConnection, err := a.bot.Session().ChannelVoiceJoin(event.guildID, event.voiceChannelID, false, true)
 
 		if err != nil {
@@ -207,46 +203,11 @@ func (a *Audio) ProcessAudioEventQueue() {
 		// Will this repetitively add handlers?
 		voiceConnection.AddHandler(a.onVoiceSpeakingUpdate)
 
+		// Send Opus audio until it's finished or a control is received.
 		a.SendOpus(voiceConnection, event)
 	}
 
 	a.bot.VoiceLog().Fatal("Exited playAudio")
-}
-
-// TODO
-//
-// Need to ensure that the Decoder map doesn't leak resources by ensuring
-// that we remove the Decoder whenever the source no longer exists.
-//
-// To do this we can establish a VoiceSpeakingUpdate handler for a given
-// VoiceConnection which will maintain a map of UserID → SSRC, while a
-// handler for VoiceStateUpdate will check for when a UserID leaves a voice
-// channel without joining another one. When this happens, the UserID's SSRC
-// should be looked up and the entry for that SSRC should be removed from
-// the decoders map.
-//
-// Since that logic is specific to Audio, it would be preferable if this
-// type simply exposed methods such as onVoiceSpeakingUpdate() and
-// onVoiceStateUpdate() which are invoked by the Bot.
-
-func (a *Audio) onVoiceSpeakingUpdate(voiceConnection *discordgo.VoiceConnection, speakingUpdate *discordgo.VoiceSpeakingUpdate) {
-	// In discordgo VoiceSpeakingUpdate.SSRC is int while it's uint32 everywhere
-	// else.
-	a.userSSRCs[speakingUpdate.UserID] = uint32(speakingUpdate.SSRC)
-}
-
-func (a *Audio) onUserLeaveVoiceChannel(voiceState *discordgo.VoiceState) {
-	// User left the channel, either their SSRC is no longer relevant or it may
-	// change if they join another channel (?), so to be safe remove their entry.
-	//
-	// Note that this may be a critical section. For example, what if this
-	// triggers while in the middle of receivePCM()? Should it multiplex on a
-	// channel that receives such a notification? Or what if the user has left but
-	// we still have audio buffered that we're in the process of decoding?
-	if voiceState.ChannelID == "" {
-		delete(a.streamDecoders, a.userSSRCs[voiceState.UserID])
-		delete(a.userSSRCs, voiceState.UserID)
-	}
 }
 
 // StopSpeaking emits Speaking(false) after a 250ms delay in the hopes that
@@ -409,6 +370,42 @@ func (a *Audio) GetOrConvertFile(filePath string, keys ...string) (*os.File, err
 	}).Info("Encoded Opus")
 
 	return os.Open(audioPath)
+}
+
+// TODO
+//
+// Need to ensure that the Decoder map doesn't leak resources by ensuring
+// that we remove the Decoder whenever the source no longer exists.
+//
+// To do this we can establish a VoiceSpeakingUpdate handler for a given
+// VoiceConnection which will maintain a map of UserID → SSRC, while a
+// handler for VoiceStateUpdate will check for when a UserID leaves a voice
+// channel without joining another one. When this happens, the UserID's SSRC
+// should be looked up and the entry for that SSRC should be removed from
+// the decoders map.
+//
+// Since that logic is specific to Audio, it would be preferable if this
+// type simply exposed methods such as onVoiceSpeakingUpdate() and
+// onVoiceStateUpdate() which are invoked by the Bot.
+
+func (a *Audio) onVoiceSpeakingUpdate(voiceConnection *discordgo.VoiceConnection, speakingUpdate *discordgo.VoiceSpeakingUpdate) {
+	// In discordgo VoiceSpeakingUpdate.SSRC is int while it's uint32 everywhere
+	// else.
+	a.userSSRCs[speakingUpdate.UserID] = uint32(speakingUpdate.SSRC)
+}
+
+func (a *Audio) onUserLeaveVoiceChannel(voiceState *discordgo.VoiceState) {
+	// User left the channel, either their SSRC is no longer relevant or it may
+	// change if they join another channel (?), so to be safe remove their entry.
+	//
+	// Note that this may be a critical section. For example, what if this
+	// triggers while in the middle of receivePCM()? Should it multiplex on a
+	// channel that receives such a notification? Or what if the user has left but
+	// we still have audio buffered that we're in the process of decoding?
+	if voiceState.ChannelID == "" {
+		delete(a.streamDecoders, a.userSSRCs[voiceState.UserID])
+		delete(a.userSSRCs, voiceState.UserID)
+	}
 }
 
 // Receive audio packets from the Discord voice connection and Opus-decode them
