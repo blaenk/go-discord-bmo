@@ -316,7 +316,6 @@ func (a *Audio) SendPCM(voiceConnection *discordgo.VoiceConnection, event *Audio
 	}()
 
 	voiceConnection.Speaking(true)
-	defer voiceConnection.Speaking(false)
 
 	for {
 		a.stateCond.L.Lock()
@@ -325,6 +324,10 @@ func (a *Audio) SendPCM(voiceConnection *discordgo.VoiceConnection, event *Audio
 		case playerActionSkip:
 			// Just quit the PCM-sending loop and let things here get garbage collected.
 			event.audio.Close()
+
+			time.Sleep(250 * time.Millisecond)
+			voiceConnection.Speaking(false)
+
 			a.stateCond.L.Unlock()
 			return
 
@@ -337,12 +340,19 @@ func (a *Audio) SendPCM(voiceConnection *discordgo.VoiceConnection, event *Audio
 		case playerActionAbort:
 			// Clear the queue and quit the loop.
 			a.queue.Clear()
+			time.Sleep(250 * time.Millisecond)
+			voiceConnection.Speaking(false)
+
 			a.stateCond.L.Unlock()
 			return
 
 		case playerActionPreempt:
 			a.queue.EnqueueFront(event)
 			a.queue.Preempt()
+
+			time.Sleep(250 * time.Millisecond)
+			voiceConnection.Speaking(false)
+
 			a.stateCond.L.Unlock()
 			return
 		}
@@ -357,24 +367,37 @@ func (a *Audio) SendPCM(voiceConnection *discordgo.VoiceConnection, event *Audio
 		if err == io.EOF {
 			a.bot.VoiceLog().Info("Audio EOF")
 			event.audio.Close()
+
+			time.Sleep(250 * time.Millisecond)
+			voiceConnection.Speaking(false)
 			return
 		}
 
 		if err == io.ErrUnexpectedEOF {
 			a.bot.VoiceLog().Info("Audio unexpected EOF")
 			event.audio.Close()
+
+			time.Sleep(250 * time.Millisecond)
+			voiceConnection.Speaking(false)
 			return
 		}
 
 		if err != nil {
 			a.bot.VoiceLog().WithError(err).Error("Error reading from ffmpeg stdout")
 			event.audio.Close()
+
+			time.Sleep(250 * time.Millisecond)
+			voiceConnection.Speaking(false)
 			return
 		}
 
 		if !voiceConnection.Ready || voiceConnection.OpusSend == nil {
 			a.bot.VoiceLog().Error("Client isn't ready to send Opus packets")
 			// Keep looping until it's ready, otherwise this event will be dropped.
+
+			time.Sleep(250 * time.Millisecond)
+			voiceConnection.Speaking(false)
+			return
 		}
 
 		// Send the Opus frame through the Discord voice connection.
