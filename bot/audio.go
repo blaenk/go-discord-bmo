@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -38,115 +37,6 @@ type AudioEvent struct {
 	guildID        string
 	voiceChannelID string
 	audio          io.ReadCloser
-}
-
-// AudioEventQueue represents a blocking audio event queue.
-type AudioEventQueue struct {
-	cond  *sync.Cond
-	queue []*AudioEvent
-}
-
-func NewAudioEventQueue() *AudioEventQueue {
-	return &AudioEventQueue{
-		queue: make([]*AudioEvent, 0, 10),
-		cond:  sync.NewCond(new(sync.Mutex)),
-	}
-}
-
-func (q *AudioEventQueue) Clear() {
-	q.cond.L.Lock()
-	defer q.cond.L.Unlock()
-
-	for _, event := range q.queue {
-		event.audio.Close()
-	}
-
-	q.queue = make([]*AudioEvent, 0, 10)
-}
-
-func (q *AudioEventQueue) Enqueue(event *AudioEvent) {
-	q.cond.L.Lock()
-
-	q.queue = append(q.queue, event)
-
-	q.cond.Signal()
-	q.cond.L.Unlock()
-}
-
-// Preempt swaps the head and the event after it.
-func (q *AudioEventQueue) Preempt() {
-	q.cond.L.Lock()
-
-	if len(q.queue) < 2 {
-		return
-	}
-
-	head, next := q.queue[0], q.queue[1]
-
-	q.queue[0] = next
-	q.queue[1] = head
-
-	q.cond.L.Unlock()
-}
-
-func (q *AudioEventQueue) EnqueueFront(event *AudioEvent) {
-	q.cond.L.Lock()
-
-	q.queue = append([]*AudioEvent{event}, q.queue...)
-
-	q.cond.L.Unlock()
-}
-
-func (q *AudioEventQueue) Dequeue() *AudioEvent {
-	q.cond.L.Lock()
-
-	for len(q.queue) == 0 {
-		q.cond.Wait()
-	}
-
-	var event *AudioEvent
-	event, q.queue = q.queue[0], q.queue[1:]
-
-	q.cond.Signal()
-	q.cond.L.Unlock()
-
-	return event
-}
-
-type AudioMetadata struct {
-	Origin   string
-	AudioURL string
-	Title    string
-}
-
-func GetAudioMetadata(url string) (*AudioMetadata, error) {
-	out, err := exec.Command(
-		"youtube-dl",
-		"--get-title",
-		"--get-url",
-		"--format",
-		"bestaudio",
-		url,
-	).Output()
-
-	audio := &AudioMetadata{}
-
-	if err != nil {
-		return audio, err
-	}
-
-	trimmed := strings.TrimSpace(string(out))
-	components := strings.Split(trimmed, "\n")
-
-	if len(components) != 2 {
-		return audio, fmt.Errorf("Expected two components (title, url) got: %+v", components)
-	}
-
-	audio.Origin = url
-	audio.Title = components[0]
-	audio.AudioURL = components[1]
-
-	return audio, nil
 }
 
 // Audio contains the state needed for audio receiving and sending.
@@ -257,12 +147,18 @@ func (a *Audio) EnqueueAudioFile(guildID, voiceChannelID string, file *os.File) 
 	})
 }
 
+// TODO
+// Note that this is serialized across all guilds, meaning only one audio event
+// will be processed at any given moment. Perhaps a better approach would be to
+// maintain a table of guilds → AudioEventQueues and process them each
+// concurrently.
 func (a *Audio) ProcessAudioEventQueue() {
 	a.bot.VoiceLog().Info("Starting PlayAudio goroutine")
 
 	for {
 		a.stateCond.L.Lock()
 
+		// Don't continue as long as the player is paused.
 		for a.playerState == playerActionPause {
 			a.stateCond.Wait()
 		}
@@ -271,7 +167,7 @@ func (a *Audio) ProcessAudioEventQueue() {
 
 		a.stateCond.L.Unlock()
 
-		// Process an audio event
+		// Process an audio event.
 		event := a.queue.Dequeue()
 
 		a.bot.VoiceLog().WithFields(log.Fields{
@@ -301,8 +197,7 @@ func (a *Audio) ProcessAudioEventQueue() {
 		// Will this repetitively add handlers?
 		voiceConnection.AddHandler(a.onVoiceSpeakingUpdate)
 
-		a.SendPCM(voiceConnection, event)
-
+		a.SendOpus(voiceConnection, event)
 	}
 
 	a.bot.VoiceLog().Fatal("Exited playAudio")
@@ -344,8 +239,16 @@ func (a *Audio) onUserLeaveVoiceChannel(voiceState *discordgo.VoiceState) {
 	}
 }
 
-// SendPCM sends s16le PCM from the given reader to the given voice connection.
-func (a *Audio) SendPCM(voiceConnection *discordgo.VoiceConnection, event *AudioEvent) {
+// StopSpeaking emits Speaking(false) after a 250ms delay in the hopes that
+// discordgo is done with the channel by then, otherwise discordgo resets it to
+// Speaking(true).
+func (a *Audio) StopSpeaking(voiceConnection *discordgo.VoiceConnection) {
+	time.Sleep(250 * time.Millisecond)
+	voiceConnection.Speaking(false)
+}
+
+// SendOpus sends Opus-encoded data to the voice connection.
+func (a *Audio) SendOpus(voiceConnection *discordgo.VoiceConnection, event *AudioEvent) {
 	a.sendCond.L.Lock()
 
 	for a.sendingPCM {
@@ -370,32 +273,21 @@ func (a *Audio) SendPCM(voiceConnection *discordgo.VoiceConnection, event *Audio
 
 		switch a.playerState {
 		case playerActionClear, playerActionSkip:
-			// Just quit the PCM-sending loop and let things here get garbage collected.
 			event.audio.Close()
-
-			time.Sleep(250 * time.Millisecond)
-			voiceConnection.Speaking(false)
-
+			a.StopSpeaking(voiceConnection)
 			a.stateCond.L.Unlock()
 			return
 
 		case playerActionPause:
-			// Put the event back at the front of the queue and quit the PCM-sending loop.
 			a.queue.EnqueueFront(event)
-
-			time.Sleep(250 * time.Millisecond)
-			voiceConnection.Speaking(false)
-
+			a.StopSpeaking(voiceConnection)
 			a.stateCond.L.Unlock()
 			return
 
 		case playerActionPreempt:
 			a.queue.EnqueueFront(event)
 			a.queue.Preempt()
-
-			time.Sleep(250 * time.Millisecond)
-			voiceConnection.Speaking(false)
-
+			a.StopSpeaking(voiceConnection)
 			a.stateCond.L.Unlock()
 			return
 		}
@@ -411,8 +303,7 @@ func (a *Audio) SendPCM(voiceConnection *discordgo.VoiceConnection, event *Audio
 			a.bot.VoiceLog().Info("Audio EOF")
 			event.audio.Close()
 
-			time.Sleep(250 * time.Millisecond)
-			voiceConnection.Speaking(false)
+			a.StopSpeaking(voiceConnection)
 			return
 		}
 
@@ -420,8 +311,7 @@ func (a *Audio) SendPCM(voiceConnection *discordgo.VoiceConnection, event *Audio
 			a.bot.VoiceLog().Info("Audio unexpected EOF")
 			event.audio.Close()
 
-			time.Sleep(250 * time.Millisecond)
-			voiceConnection.Speaking(false)
+			a.StopSpeaking(voiceConnection)
 			return
 		}
 
@@ -429,8 +319,7 @@ func (a *Audio) SendPCM(voiceConnection *discordgo.VoiceConnection, event *Audio
 			a.bot.VoiceLog().WithError(err).Error("Error reading from ffmpeg stdout")
 			event.audio.Close()
 
-			time.Sleep(250 * time.Millisecond)
-			voiceConnection.Speaking(false)
+			a.StopSpeaking(voiceConnection)
 			return
 		}
 
@@ -438,8 +327,7 @@ func (a *Audio) SendPCM(voiceConnection *discordgo.VoiceConnection, event *Audio
 			a.bot.VoiceLog().Error("Client isn't ready to send Opus packets")
 			// Keep looping until it's ready, otherwise this event will be dropped.
 
-			time.Sleep(250 * time.Millisecond)
-			voiceConnection.Speaking(false)
+			a.StopSpeaking(voiceConnection)
 			return
 		}
 
