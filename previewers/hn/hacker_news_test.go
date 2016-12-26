@@ -3,19 +3,25 @@ package hn
 import "testing"
 
 func TestFormatStory(t *testing.T) {
-	story := getHNItem(13027718)
+	story, err := getHNItem(13027718)
 
-	story.formatStory()
+	if err != nil {
+		t.Error("Expected no error")
+	}
 }
 
 func TestFormatComment(t *testing.T) {
-	comment := getHNItem(13028891)
+	comment, err := getHNItem(13028891)
 
-	comment.formatComment()
+	if err != nil {
+		t.Error("Expected no error")
+	}
 }
 
 func TestDeepFormatComment(t *testing.T) {
-	comment := getHNItem(13030726)
+	comment, err := getHNItem(13030726)
 
-	comment.formatComment()
+	if err != nil {
+		t.Error("Expected no error")
+	}
 }
