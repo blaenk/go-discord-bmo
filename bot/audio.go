@@ -53,7 +53,6 @@ type Audio struct {
 	receiveCond *sync.Cond
 	stateCond   *sync.Cond
 
-	discordAudioOutput   chan []int16
 	OnInboundAudioPacket func(*discordgo.Packet)
 
 	queue *AudioEventQueue
@@ -62,14 +61,13 @@ type Audio struct {
 // NewAudio creates an Audio struct
 func NewAudio(bot *Bot) *Audio {
 	return &Audio{
-		bot:                bot,
-		sendCond:           sync.NewCond(new(sync.Mutex)),
-		receiveCond:        sync.NewCond(new(sync.Mutex)),
-		stateCond:          sync.NewCond(new(sync.Mutex)),
-		userSSRCs:          map[string]uint32{},
-		streamDecoders:     map[uint32]*gopus.Decoder{},
-		discordAudioOutput: make(chan []int16, channels),
-		queue:              NewAudioEventQueue(),
+		bot:            bot,
+		sendCond:       sync.NewCond(new(sync.Mutex)),
+		receiveCond:    sync.NewCond(new(sync.Mutex)),
+		stateCond:      sync.NewCond(new(sync.Mutex)),
+		userSSRCs:      map[string]uint32{},
+		streamDecoders: map[uint32]*gopus.Decoder{},
+		queue:          NewAudioEventQueue(),
 	}
 }
 
