@@ -23,16 +23,28 @@ const (
 	frameSize int = 960
 )
 
+// PlayerState represents the current player state.
+type PlayerState int
+
 const (
-	playerActionReady = iota
-	playerActionSkip
-	playerActionClear
-	playerActionPause
-	playerActionPreempt
+	// PlayerStateReady is a neutral ready state.
+	PlayerStateReady PlayerState = iota
+
+	// PlayerStatePaused means the player was paused.
+	PlayerStatePaused
+
+	// PlayerStateSkipped means the player skipped the previous event.
+	PlayerStateSkipped
+
+	// PlayerStateCleared means the player cleared out the event queue.
+	PlayerStateCleared
+
+	// PlayerStatePreempted means the event was preempted by the next event.
+	PlayerStatePreempted
 )
 
 // AudioEvent is a self-contained representation of an intent to emit audio in a
-// given voice channel.
+// given guild's voice channel.
 type AudioEvent struct {
 	guildID        string
 	voiceChannelID string
@@ -47,7 +59,7 @@ type Audio struct {
 
 	sendingPCM   bool
 	receivingPCM bool
-	playerState  int
+	playerState  PlayerState
 
 	sendCond    *sync.Cond
 	receiveCond *sync.Cond
@@ -74,7 +86,7 @@ func NewAudio(bot *Bot) *Audio {
 func (a *Audio) Skip() {
 	a.stateCond.L.Lock()
 
-	a.playerState = playerActionSkip
+	a.playerState = PlayerStateSkipped
 
 	a.stateCond.Signal()
 	a.stateCond.L.Unlock()
@@ -83,7 +95,7 @@ func (a *Audio) Skip() {
 func (a *Audio) Abort() {
 	a.stateCond.L.Lock()
 
-	a.playerState = playerActionClear
+	a.playerState = PlayerStateCleared
 
 	a.stateCond.Signal()
 	a.stateCond.L.Unlock()
@@ -92,7 +104,7 @@ func (a *Audio) Abort() {
 func (a *Audio) Pause() {
 	a.stateCond.L.Lock()
 
-	a.playerState = playerActionPause
+	a.playerState = PlayerStatePaused
 
 	a.stateCond.Signal()
 	a.stateCond.L.Unlock()
@@ -101,7 +113,7 @@ func (a *Audio) Pause() {
 func (a *Audio) Resume() {
 	a.stateCond.L.Lock()
 
-	a.playerState = playerActionReady
+	a.playerState = PlayerStateReady
 
 	a.stateCond.Signal()
 	a.stateCond.L.Unlock()
@@ -111,7 +123,7 @@ func (a *Audio) Clear() {
 	a.stateCond.L.Lock()
 
 	a.queue.Clear()
-	a.playerState = playerActionClear
+	a.playerState = PlayerStateCleared
 
 	a.stateCond.Signal()
 	a.stateCond.L.Unlock()
@@ -132,7 +144,7 @@ func (a *Audio) Preempt(guildID, voiceChannelID, filePath string) {
 		a.stateCond.L.Unlock()
 	}()
 
-	a.playerState = playerActionPreempt
+	a.playerState = PlayerStatePreempted
 
 	// a.EnqueueAudioFile(guildID, voiceChannelID, filePath)
 }
@@ -157,11 +169,11 @@ func (a *Audio) ProcessAudioEventQueue() {
 		a.stateCond.L.Lock()
 
 		// Don't continue as long as the player is paused.
-		for a.playerState == playerActionPause {
+		for a.playerState == PlayerStatePaused {
 			a.stateCond.Wait()
 		}
 
-		a.playerState = playerActionReady
+		a.playerState = PlayerStateReady
 
 		a.stateCond.L.Unlock()
 
@@ -270,19 +282,19 @@ func (a *Audio) SendOpus(voiceConnection *discordgo.VoiceConnection, event *Audi
 		a.stateCond.L.Lock()
 
 		switch a.playerState {
-		case playerActionClear, playerActionSkip:
+		case PlayerStateCleared, PlayerStateSkipped:
 			event.audio.Close()
 			a.StopSpeaking(voiceConnection)
 			a.stateCond.L.Unlock()
 			return
 
-		case playerActionPause:
+		case PlayerStatePaused:
 			a.queue.EnqueueFront(event)
 			a.StopSpeaking(voiceConnection)
 			a.stateCond.L.Unlock()
 			return
 
-		case playerActionPreempt:
+		case PlayerStatePreempted:
 			a.queue.EnqueueFront(event)
 			a.queue.Preempt()
 			a.StopSpeaking(voiceConnection)
