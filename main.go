@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"os/signal"
+	"syscall"
 	"time"
 
 	log "github.com/Sirupsen/logrus"
@@ -35,9 +36,14 @@ func main() {
 
 	log.RegisterExitHandler(func() { bot.Close() })
 
-	// Listen for SIGINT and gracefully disconnect.
 	signalChannel := make(chan os.Signal, 1)
+
+	// Listen for SIGINT and gracefully disconnect.
 	signal.Notify(signalChannel, os.Interrupt)
+
+	// Listen for SIGPIPE for when e.g. we're using tee to print and save log
+	// output.
+	signal.Notify(signalChannel, syscall.SIGPIPE)
 
 	<-signalChannel
 }
