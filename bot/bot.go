@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"strings"
 	"sync"
 
 	log "github.com/Sirupsen/logrus"
@@ -82,6 +83,10 @@ func (b *Bot) VoiceLog() *log.Entry {
 // Session provides access to the underlying Discord session.
 func (b *Bot) Session() *discordgo.Session {
 	return b.session
+}
+
+func (b *Bot) Audio() *Audio {
+	return b.audio
 }
 
 // Close closes the Discord session.
@@ -252,6 +257,28 @@ func (b *Bot) previewURLs(msg *discordgo.Message) {
 	}
 }
 
+func (b *Bot) ReplyToMessage(msg *discordgo.Message, content string) (*discordgo.Message, error) {
+	return b.Session().ChannelMessageSend(msg.ChannelID, "<@"+msg.Author.ID+">: "+content)
+}
+
+func (b *Bot) MessageMentionsBot(msg *discordgo.Message) bool {
+	for _, mention := range msg.Mentions {
+		if b.IsSelf(mention.ID) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (b *Bot) MessageCommandsBot(msg *discordgo.Message) bool {
+	return strings.HasPrefix(msg.Content, "<@"+b.userID+">")
+}
+
+func (b *Bot) MessageCommand(msg *discordgo.Message) string {
+	return msg.Content[len(b.userID)+4:]
+}
+
 func (b *Bot) getIvonaSpeech(text string) (string, error) {
 	shaSum := fmt.Sprintf("%x", sha1.Sum([]byte(text)))
 	speechPath := path.Join("./data/speech", shaSum)
@@ -279,7 +306,35 @@ func (b *Bot) getIvonaSpeech(text string) (string, error) {
 	return speechPath, nil
 }
 
-func (b *Bot) ivonaSpeak(guildID, voiceChannelID, text string) error {
+func (b *Bot) UserVoiceState(guildID, userID string) (*discordgo.VoiceState, error) {
+	guildState, ok := b.voiceStateCache[guildID]
+
+	if !ok {
+		return nil, fmt.Errorf("No VoiceState for Guild %s", guildID)
+	}
+
+	voiceState, ok := guildState[userID]
+
+	if !ok {
+		return nil, fmt.Errorf("No VoiceState for User %s", guildID)
+	}
+
+	return voiceState, nil
+}
+
+// TODO
+// Not really useful?
+func (b *Bot) JoinUserVoiceChannel(guildID, userID string) (*discordgo.VoiceConnection, error) {
+	voiceState, err := b.UserVoiceState(guildID, userID)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return b.Session().ChannelVoiceJoin(guildID, voiceState.ChannelID, false, true)
+}
+
+func (b *Bot) Speak(guildID, voiceChannelID, text string) error {
 	// TODO
 	// Look into the possibility of pausing certain audio transmissions, switching
 	// channels, then switching back and resuming.
@@ -291,7 +346,14 @@ func (b *Bot) ivonaSpeak(guildID, voiceChannelID, text string) error {
 			"channel": voiceChannelID,
 		}).Info("Emitting speech event")
 
-		b.audio.EnqueueAudioFile(guildID, voiceChannelID, speechFile)
+		file, err := b.audio.GetOrConvertFile(speechFile, text)
+
+		if err != nil {
+			b.voiceLog.WithError(err).Error("Couldn't get or convert speech file")
+			return err
+		}
+
+		b.audio.EnqueueAudioFile(guildID, voiceChannelID, file)
 	} else {
 		return err
 	}
@@ -317,30 +379,9 @@ func (b *Bot) speakPresenceUpdate(voiceState *discordgo.VoiceState, action strin
 
 	presenceText := fmt.Sprintf("%s %s the channel", memberFriendlyName(member), action)
 
-	if err := b.ivonaSpeak(voiceState.GuildID, voiceState.ChannelID, presenceText); err != nil {
+	if err := b.Speak(voiceState.GuildID, voiceState.ChannelID, presenceText); err != nil {
 		b.sessionLog.WithError(err).Error("Couldn't speak with Ivona")
 	}
-}
-
-func (b *Bot) logger(logger *log.Entry, args ...interface{}) *log.Entry {
-	for _, arg := range args {
-		if arg == nil {
-			continue
-		}
-
-		switch t := arg.(type) {
-		case *discordgo.Guild:
-			logger = logger.WithField("guild", t.Name)
-
-		case *discordgo.Channel:
-			logger = logger.WithField("channel", t.Name)
-
-		case *discordgo.Member:
-			logger = logger.WithField("user", memberDiscordTag(t))
-		}
-	}
-
-	return logger
 }
 
 func (b *Bot) voiceStateLog(voiceState *discordgo.VoiceState) *log.Entry {

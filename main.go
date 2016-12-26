@@ -3,11 +3,13 @@ package main
 import (
 	"os"
 	"os/signal"
+	"time"
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/joho/godotenv"
 
 	"github.com/blaenk/bmo/bot"
+	"github.com/blaenk/bmo/commanders/audio"
 	"github.com/blaenk/bmo/commanders/ping"
 	"github.com/blaenk/bmo/previewers/hn"
 )
@@ -17,9 +19,15 @@ func main() {
 		log.Fatal("Error loading .env file")
 	}
 
+	log.SetFormatter(&log.JSONFormatter{
+		TimestampFormat: time.RFC3339Nano,
+	})
+
 	bot := bot.New()
 
 	bot.RegisterCommand(ping.New())
+	bot.RegisterCommand(audio.New())
+
 	bot.RegisterPreviewer(hn.New())
 
 	bot.Open()

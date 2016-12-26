@@ -9,7 +9,9 @@ import (
 	"os/exec"
 	"path"
 	"strconv"
+	"strings"
 	"sync"
+	"time"
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/bwmarrin/discordgo"
@@ -25,7 +27,7 @@ const (
 const (
 	playerActionReady = iota
 	playerActionSkip
-	playerActionAbort
+	playerActionClear
 	playerActionPause
 	playerActionPreempt
 )
@@ -111,6 +113,42 @@ func (q *AudioEventQueue) Dequeue() *AudioEvent {
 	return event
 }
 
+type AudioMetadata struct {
+	Origin   string
+	AudioURL string
+	Title    string
+}
+
+func GetAudioMetadata(url string) (*AudioMetadata, error) {
+	out, err := exec.Command(
+		"youtube-dl",
+		"--get-title",
+		"--get-url",
+		"--format",
+		"bestaudio",
+		url,
+	).Output()
+
+	audio := &AudioMetadata{}
+
+	if err != nil {
+		return audio, err
+	}
+
+	trimmed := strings.TrimSpace(string(out))
+	components := strings.Split(trimmed, "\n")
+
+	if len(components) != 2 {
+		return audio, fmt.Errorf("Expected two components (title, url) got: %+v", components)
+	}
+
+	audio.Origin = url
+	audio.Title = components[0]
+	audio.AudioURL = components[1]
+
+	return audio, nil
+}
+
 // Audio contains the state needed for audio receiving and sending.
 type Audio struct {
 	bot            *Bot
@@ -157,7 +195,7 @@ func (a *Audio) Skip() {
 func (a *Audio) Abort() {
 	a.stateCond.L.Lock()
 
-	a.playerState = playerActionAbort
+	a.playerState = playerActionClear
 
 	a.stateCond.Signal()
 	a.stateCond.L.Unlock()
@@ -172,6 +210,33 @@ func (a *Audio) Pause() {
 	a.stateCond.L.Unlock()
 }
 
+func (a *Audio) Resume() {
+	a.stateCond.L.Lock()
+
+	a.playerState = playerActionReady
+
+	a.stateCond.Signal()
+	a.stateCond.L.Unlock()
+}
+
+func (a *Audio) Clear() {
+	a.stateCond.L.Lock()
+
+	a.queue.Clear()
+	a.playerState = playerActionClear
+
+	a.stateCond.Signal()
+	a.stateCond.L.Unlock()
+}
+
+// TODO
+// Fix this with respect to separation of EnqueueAudioFile and GetOrConvertFile
+//
+// The problem is that it needs to be done right away but we can't do that since
+// we have to wait for GetOrConvertFile to finish.
+//
+// Find a way to immediately enqueue some struct that starts to fulfill itself
+// in the background where a .Get() method blocks until it's fulfilled. Promise?
 func (a *Audio) Preempt(guildID, voiceChannelID, filePath string) {
 	a.stateCond.L.Lock()
 	defer func() {
@@ -181,32 +246,15 @@ func (a *Audio) Preempt(guildID, voiceChannelID, filePath string) {
 
 	a.playerState = playerActionPreempt
 
-	a.EnqueueAudioFile(guildID, voiceChannelID, filePath)
+	// a.EnqueueAudioFile(guildID, voiceChannelID, filePath)
 }
 
-func (a *Audio) EnqueueAudioFile(guildID, voiceChannelID, filePath string) {
-	// TODO
-	// This won't preserve enqueue order. e.g. if 1st enqueue takes 1hr to convert
-	// but 2nd enqueue takes 10 seconds, 2nd enqueue will effectively be enqueued
-	// first.
-	//
-	// Perhaps if the event is enqueued immediately but an Event.convert() is
-	// potentially run in a goroutine, eventually fulfilling an os.File* on the
-	// event struct when ready, while an attempt to read event.Audio() will block
-	// until it's available?
-	go func() {
-		convertedAudio, err := a.getOrConvertFile(filePath)
-
-		if err != nil {
-			return
-		}
-
-		a.queue.Enqueue(&AudioEvent{
-			guildID:        guildID,
-			voiceChannelID: voiceChannelID,
-			audio:          convertedAudio,
-		})
-	}()
+func (a *Audio) EnqueueAudioFile(guildID, voiceChannelID string, file *os.File) {
+	a.queue.Enqueue(&AudioEvent{
+		guildID:        guildID,
+		voiceChannelID: voiceChannelID,
+		audio:          file,
+	})
 }
 
 func (a *Audio) ProcessAudioEventQueue() {
@@ -321,7 +369,7 @@ func (a *Audio) SendPCM(voiceConnection *discordgo.VoiceConnection, event *Audio
 		a.stateCond.L.Lock()
 
 		switch a.playerState {
-		case playerActionSkip:
+		case playerActionClear, playerActionSkip:
 			// Just quit the PCM-sending loop and let things here get garbage collected.
 			event.audio.Close()
 
@@ -334,12 +382,7 @@ func (a *Audio) SendPCM(voiceConnection *discordgo.VoiceConnection, event *Audio
 		case playerActionPause:
 			// Put the event back at the front of the queue and quit the PCM-sending loop.
 			a.queue.EnqueueFront(event)
-			a.stateCond.L.Unlock()
-			return
 
-		case playerActionAbort:
-			// Clear the queue and quit the loop.
-			a.queue.Clear()
 			time.Sleep(250 * time.Millisecond)
 			voiceConnection.Speaking(false)
 
@@ -405,10 +448,22 @@ func (a *Audio) SendPCM(voiceConnection *discordgo.VoiceConnection, event *Audio
 	}
 }
 
-func (a *Audio) getOrConvertFile(filePath string) (io.ReadCloser, error) {
+// TODO
+// This should accept an explicit key. When filePath is a youtube-dl-derived
+// youtube audioURL, the URL may be different each time even though it's been
+// downloading before. In this case it should be determined by the Origin URL.
+func (a *Audio) GetOrConvertFile(filePath string, keys ...string) (*os.File, error) {
+	var key string
+
+	if len(keys) == 0 {
+		key = filePath
+	} else {
+		key = keys[0]
+	}
+
 	a.bot.VoiceLog().WithField("path", filePath).Info("Getting or converting file")
 
-	shaSum := fmt.Sprintf("%x", sha1.Sum([]byte(filePath)))
+	shaSum := fmt.Sprintf("%x", sha1.Sum([]byte(key)))
 	audioPath := path.Join("./data/opus", shaSum)
 
 	if _, err := os.Stat(audioPath); err == nil {
